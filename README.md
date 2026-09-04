@@ -2,9 +2,9 @@
 
 **A Uniswap v4 hook that protects LPs in tokenized-stock pools by pricing fees off the underlying market's trading calendar and reference-price staleness, jointly, while keeping the pool open.**
 
-Built for [ETHOnline 2026](https://ethglobal.com/events/ethonline2026) (Sept 4–16). Uniswap Foundation track: Best Uniswap Stack Contribution. Uses Chainlink Data Feeds.
+Built for [ETHOnline 2026](https://ethglobal.com/events/ethonline2026) (build window opens Sept 4; submission deadline Sept 13, 12:00 pm EDT). Uniswap Foundation track: Best Uniswap Stack Contribution. Uses Chainlink Data Feeds.
 
-> Status: **in progress**. Design and scaffolding began Sept 1; hook code from Sept 4. Sections marked `[TBD]` are filled in as results land.
+> Status: **in progress**. Pre-window work, disclosed to ETHGlobal: this README, the design doc (`docs/proposal.md`), and the Uniswap v4-template boilerplate scaffold. All project code is written from the Sept 4 kickoff. Sections marked `[TBD]` are filled in as results land.
 
 ---
 
@@ -14,16 +14,16 @@ Uniswap already has the equity liquidity. About 60% of it trades while the refer
 
 ## The problem
 
-US equities trade roughly 19% of the week. Tokenized stocks trade 24/7. For ~17.5 hours on weekdays and the entire weekend, a Uniswap pool is the only on-chain price discovery for the token, while the Chainlink reference repeats Friday's close. When the market reopens, the real price asserts itself and an arbitrageur — in practice a KYB-onboarded authorized participant, the only party who can redeem — trades the gap against the passive LP in one swap.
+US equities trade roughly 19% of the week. Tokenized stocks trade 24/7. For ~17.5 hours on weekdays and the entire weekend, a Uniswap pool is the only on-chain price discovery for the token, while the Chainlink reference goes dark. Verified on-chain: these feeds are `us_equities_24/5` — live from ~Sunday 20:00 ET through Friday evening, then frozen for ~52 hours with the 24h heartbeat suspended. The reference wakes and gaps **Sunday 20:00 ET** (SPY moved −0.53% across one such boundary), 13.5 hours before the regular open. When the market reopens, the real price asserts itself and an arbitrageur — in practice a KYB-onboarded authorized participant, the only party who can redeem — trades the gap against the passive LP in one swap.
 
 This is loss-versus-rebalancing, the central LP problem in AMMs, made structurally worse by a reference market that is closed two-thirds of the time. Every production LVR-mitigation design we surveyed infers toxicity from a signal that only exists in continuous markets. On a Sunday afternoon they all read "calm" and quote their minimum fee to the Monday-morning arbitrageur.
 
 **Where this is happening, verified on-chain (Sept 1 2026):**
 
 - Robinhood Chain (ID 4663): 194 Robinhood Stock Tokens, 25,139 Uniswap v4 pools touching them, ~99% of the chain's tokenized-stock DEX liquidity on Uniswap, cumulative volume past $1B.
-- The largest pools — SPY/USDG, TSLA/USDG, AAPL/USDG, SPY/NVDA — all run a **static fee with no hook**.
+- The deepest pools — SPY/USDG, TSLA/USDG, AAPL/USDG, SPY/NVDA — all run a **static fee with no hook**. (One protocol, Fables, does run its own calendar-fee'd stock pools alongside them — see Novelty.)
 
-Full venue data, sources, and the honest gaps in the evidence: [`docs/proposal.md`](docs/proposal.md).
+Full venue data, sources, and the honest gaps in the evidence: [`docs/proposal.md`](docs/proposal.md). On-chain verification log (feed addresses, feed liveness, multiplier convention): [`docs/verified-onchain.md`](docs/verified-onchain.md). Closest prior art: [`docs/prior-art-fables.md`](docs/prior-art-fables.md).
 
 ## What the hook does
 
@@ -43,7 +43,7 @@ fee = min( floor(session) × stalenessMult(updatedAt) × deviationMult, feeCap )
 
 1. **Session** from a calendar-as-data library (`MarketHours.sol`): NYSE regular / extended / overnight / closed, DST-aware, holiday table.
 2. **Staleness** from the Chainlink Data Feed's `updatedAt`: fees rise with time since the last authoritative print.
-3. **Deviation** between the pool price and the Chainlink reference, multiplier-normalized.
+3. **Deviation** between the pool price and the Chainlink reference (both already per-token — no multiplier adjustment; see Edge cases).
 4. **Direction**, evaluated on an *estimated post-swap price*: trades that move the pool toward the reference pay only the session floor; trades that take the gap pay proportionally to the gap they take. A swap sized to blast through the reference is adverse for the overshoot.
 
 The pool stays open throughout. Uninformed weekend flow fills and pays LPs; only the toxic direction and size gets priced out.
@@ -57,14 +57,14 @@ isLive = calendarOpen
       && updatedAt fresh
       && price plausible vs last known
       && quote feed fresh          (stock/SPY pools only)
-      && !token.oraclePaused()     (ERC-8056 corporate-action freeze; ABI [TBD: verify on a live token])
+      && !token.oraclePaused()     (ERC-8056 corporate-action freeze; ABI verified on-chain Sept 4)
 ```
 
 Chainlink documents states where a market is nominally open but the price is frozen — reopen auction, halts, provider outages. A stale `updatedAt` while the calendar says open is the halt detector. Paused or frozen during regular hours is treated as a halt: the pool stays open at the highest floor. There is no fifth regime.
 
 ### Edge cases handled
 
-- **Corporate actions.** Robinhood tokens expose `uiMultiplier()` (ERC-8056). Chainlink documents that the feed incorporates the multiplier into the price; the exact convention (`underlying × uiMultiplier()`) is the first thing the day-1 script checks against a live dividend-paying token (AAPL, multiplier 1.000566) `[TBD: verified on-chain]`. The hook normalizes the *pool* price into the same units and never multiplies the feed again; getting this backwards would read a permanent phantom basis on every dividend-paying token. Multiplier is cached per block in transient storage.
+- **Corporate actions — measured, then simplified.** Robinhood tokens expose `uiMultiplier()` (ERC-8056); AAPL's is 1.000566080061092436. Checking AAPL against both its Chainlink price and its deep pool settles the convention: the pool sits **0.4bp from the raw feed** versus 5.3bp under a divide-by-multiplier convention, on a multiplier worth 5.66bp. Both sides are already per-token, so **the hook applies no multiplier adjustment** — no per-swap external call, no transient cache. Residual edge case: if the multiplier and the feed price update at different moments, a transient basis appears. Evidence: [`docs/verified-onchain.md`](docs/verified-onchain.md).
 - **Stock/SPY pools.** The pool quotes SPY-per-stock; the stock feed is USD. The adapter takes an optional quote feed and compares the pool ratio to `stockFeed / quoteFeed`. Session and liveness stay keyed to the stock leg.
 - **Post-open decay.** After the reopen, only `deviationMult` decays (15 min, linear) so the pool can absorb the gap. The session floor and staleness term never decay; a 9:31 halt still pays the highest floor.
 - **Restoring trades never get a discount below the session floor.** A discount invites wash flow that farms cheap rebalancing against the LP.
@@ -72,7 +72,7 @@ Chainlink documents states where a market is nominally open but the price is fro
 
 ### Why this is not a soft halt
 
-For the fee to matter against documented 3–5% weekend gaps, `feeCap` has to be of that order (v1 default 300–500 bps, creator-set at initialization). At that cap, adverse flow near gap size is largely priced out — that is the mechanism working. Uninformed flow pays moderate session-floor fees and fills all weekend; restoring flow pays `floor × staleness` and fills. The only prior calendar-aware AMM design (`horsefacts/trading-days`) hard-reverts every one of those trades.
+For the fee to matter against documented 3–5% weekend gaps, `feeCap` has to be of that order (v1 default 300–500 bps, creator-set at initialization). At that cap, adverse flow near gap size is largely priced out — that is the mechanism working. Uninformed flow pays moderate session-floor fees and fills all weekend; restoring flow pays `floor × staleness` and fills. The calendar-aware design that *reverts* (`horsefacts/trading-days`) blocks every one of those trades. Note the live prior art (Fables) also keeps pools open, so staying open is common ground with it — the contrast that carries weight is against `trading-days`.
 
 ### Parameters (creator-set at initialization, immutable)
 
@@ -102,7 +102,8 @@ Nobody has published a pool-level weekend/reopen analysis or LVR measurement for
 
 - `[TBD]` Historical weekend chart: stock-leg pool mid vs prior-close reference plus the Monday reprice, for one stock/SPY and one stock/USDG pool. This is also the go/no-go gate on effect size, and the fallback if the Labor Day window happens to be newsless.
 - `[TBD]` Labor Day chart: same pools, Fri 16:00 ET → Tue 10:30 ET.
-- `[TBD]` Reopen reprice path, 9:30–10:30 ET Sept 8.
+- `[TBD]` **Two reopen events, not one:** the Sunday ~20:00 ET reference wake-up (when the feed unfreezes and gaps) and the 9:30–10:30 ET regular open. Charting only the latter misses the actual repricing moment.
+- `[TBD]` Does the dark window or the reopen carry the toxicity? This is the question that separates ClosingBell's floor ordering from the live prior art's (see Novelty).
 - `[TBD]` Optional: realized LVR vs fees earned over the windows.
 
 Pipeline: `scripts/spread-analysis/` (Envio HyperSync → `Swap` logs → `sqrtPriceX96` decode → decimals + multiplier normalization).
@@ -146,7 +147,7 @@ If most of v1's protection turns out to be floor × staleness, that is the findi
 | [`src/FeeCurve.sol`](src/FeeCurve.sol) | Pure library: floors, staleness and deviation multipliers, signed rule, decay, cap |
 | [`src/MarketHours.sol`](src/MarketHours.sol) | Pure library: UTC→ET with DST, session windows, NYSE holiday table |
 | [`src/IMarketStateAdapter.sol`](src/IMarketStateAdapter.sol) | Adapter interface: one underlying per pool for session; optional quote price for deviation |
-| [`src/ChainlinkEquityAdapter.sol`](src/ChainlinkEquityAdapter.sol) | v1 adapter: Data Feed price/`updatedAt`, optional quote feed, transient-storage multiplier cache, `oraclePaused()`, liveness |
+| [`src/ChainlinkEquityAdapter.sol`](src/ChainlinkEquityAdapter.sol) | v1 adapter: Data Feed price/`updatedAt`, optional quote feed, `oraclePaused()`, liveness predicate |
 | [`src/Constants.sol`](src/Constants.sol) | Verified Robinhood Chain addresses. The PoolManager is **non-canonical** on this chain |
 
 **Uniswap v4 integration points** `[TBD: exact lines]`: hook permissions (`beforeSwap`), dynamic-fee flag on pool init, fee override return in `beforeSwap`, `StateLibrary` reads for the post-swap estimate.
@@ -172,7 +173,19 @@ Dynamic-fee hooks need Uniswap Labs routing allowlisting before the official app
 
 ## Novelty, stated carefully
 
-The pieces all exist: dynamic fees, oracle-deviation hooks (Arrakis Pro, Detox; Levery, pending confirmation that it does not also condition on market hours `[TBD: verified]`), staleness decay (Valantis HOT), direction asymmetry (Balancer StableSurge), market-hours gating (`trading-days`, which reverts), and bespoke market-hours oracle pipelines (Stork for Ostium's perps). As far as the published landscape shows, no AMM design conditions LP protection on the underlying venue's trading calendar jointly with reference-price staleness and signed deviation while keeping the pool open, packaged as a reusable primitive. That is an argument from what is published, not a proof of absence: 489 hook addresses are live on Robinhood Chain, most undocumented.
+The pieces all exist: dynamic fees, oracle-deviation hooks (Arrakis Pro, Detox, Levery), staleness decay (Valantis HOT), direction asymmetry (Balancer StableSurge), market-hours gating (`trading-days`, which reverts), and bespoke market-hours oracle pipelines (Stork for Ostium's perps).
+
+**And the calendar is already occupied.** [Fables](https://www.fables.fi/) is a hook-native ve(3,3) DEX live on Robinhood Chain whose tokenized-stock pools price fees off a US-equity trading calendar in a `beforeSwap`-only hook. The overlap is substantial and worth stating plainly: same problem, same chain, same hook shape, same conditioning variable, session floors, direction asymmetry, a decay window, a cap, pools that stay open. Their contracts are verified on Sourcify; full analysis with addresses and quoted source is in [`docs/prior-art-fables.md`](docs/prior-art-fables.md).
+
+ClosingBell's contribution is not the calendar. It is:
+
+1. **Trustless on-chain conditioning where the live implementation uses a trusted operator.** Fables' `_autonomousFee` ignores its `SwapParams` and returns a pure function of `block.timestamp`. Reference-price information enters only through an authority-gated `pokeFee` override (TTL ≤ 72h), currently inactive on every stock pool. ClosingBell reads the reference every swap and prices staleness and signed deviation from it, with no privileged party.
+2. **Halt and frozen-feed detection, which a calendar structurally cannot do.** Their docs concede it — *"A calendar can miss an exceptional closure"* — and the remedy is a manual admin bitmap capped at ten forced closures a month. A 10am halt that freezes the feed leaves them charging their cheapest weekday floor against a stale reference.
+3. **An opposite, falsifiable thesis.** On every Fables equity pool `closedFloor < openFloor` — the weekend is their *cheapest* tier, gap risk charged at the reopen, on the stated rationale that *"the open and its bells are the toxic windows, not the closure."* ClosingBell prices the dark window as the highest floor. Both cannot be right, and the Measurement section above is the experiment that decides it.
+
+Secondary, each verified: immutable parameters vs admin-mutable via AccessManaged; half-days modelled vs not; ERC-8056 on-chain vs frontend-only (a multiplier mismatch blanks their UI while the pool trades on unadjusted); MIT and deployable on any v4 pool vs `UNLICENSED` and welded into one DEX.
+
+Caveat: this is the landscape as verified on Sept 4 2026, not proof of absence — 489 distinct non-zero hook addresses are live on Robinhood Chain, most undocumented.
 
 ## Feedback to Uniswap
 

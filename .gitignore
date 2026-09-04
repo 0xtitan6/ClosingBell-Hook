@@ -15,3 +15,6 @@ node_modules/
 
 # Workstream A local data (charts are committed; raw pulls are not)
 scripts/spread-analysis/data/
+
+# macOS
+.DS_Store
