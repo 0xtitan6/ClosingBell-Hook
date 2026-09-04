@@ -4,7 +4,7 @@
 
 Target: ETHOnline 2026 (Sept 4 to 16), Uniswap Foundation track, "Best Uniswap Stack Contribution"
 Builder: Neil Khedekar (0xtitan6)
-Status: Final r6 (frozen). r6 reopens r5 for day-1 on-chain findings that falsified specific claims: feed liveness is `us_equities_24/5`, not frozen-from-Friday (§2, §6A); the multiplier convention needs no adjustment (§5.3); and Fables is live prior art on this chain that invalidates the r5 novelty claim (§14, `docs/prior-art-fables.md`). Mechanism unchanged. Evidence: `docs/verified-onchain.md`. Build against this; further changes go in the repo, not here
+Status: Final r7 (frozen). r7 reopens r6 for one mechanism change and one claim retraction, both from the pre-build adversarial review (`docs/pre-build-review.md`, `docs/prior-art-verification.md`): the restoring exemption is restricted to pool-created deviation (§5.4 — as written, the exemption fired on the reopen arbitrage itself), and the novelty claim narrows to staleness-as-fee-input after four more hooks were verified (§14). Implementation decisions live in `docs/architecture.md`, not here. Previously: r6 (frozen). r6 reopens r5 for day-1 on-chain findings that falsified specific claims: feed liveness is `us_equities_24/5`, not frozen-from-Friday (§2, §6A); the multiplier convention needs no adjustment (§5.3); and Fables is live prior art on this chain that invalidates the r5 novelty claim (§14, `docs/prior-art-fables.md`). Mechanism unchanged. Evidence: `docs/verified-onchain.md`. Build against this; further changes go in the repo, not here
 Primary chain: Robinhood Chain (ID 4663), Uniswap v4
 Oracle: v1 = Chainlink Data Feeds (price + `updatedAt`) + calendar session state; production = Data Streams `marketStatus` behind `IMarketStateAdapter`
 
@@ -96,15 +96,52 @@ Compare pool price to the Chainlink reference. `deviationMult` rises from 1.0 wi
 
 **Multiplier convention (r6: resolved empirically, no adjustment needed).** Robinhood stock tokens implement ERC-8056 `uiMultiplier()` for corporate actions; AAPL's is 1.000566080061092436, verified on-chain. The day-1 check specified in §11 — AAPL against both its Chainlink price and its deep pool price — resolves the convention: the pool sits 0.4bp from the **raw** Chainlink price versus 5.3bp under a divide-by-multiplier convention, on a multiplier worth 5.66bp. Both sides are already denominated per-token, so **the hook applies no multiplier adjustment**, and the per-block `uiMultiplier()` read plus its transient-storage cache leave the hot path entirely. Residual risk, kept as a README line: if the multiplier and the feed price update at different moments, a transient basis appears. Re-verify during regular hours with a fresh feed (`docs/verified-onchain.md` §4).
 
-### 5.4 Direction asymmetry (r5: post-swap-estimated signed rule)
-The signed rule is evaluated on an **estimated post-swap price**, not the pre-swap price. In `beforeSwap` the hook has `amountSpecified`, the current `sqrtPriceX96`, and active liquidity via `StateLibrary`; a constant-liquidity approximation yields a post-swap price estimate good enough to price a fee (it only needs to be right about direction and order of magnitude). Then:
+### 5.4 Direction asymmetry (r7: restricted to pool-created deviation)
 
-- **Restoring iff `|post − ref| < |pre − ref|`**: `deviationMult = 1.0`, so the swap pays `floor(session) × stalenessMult`, capped. Never below base and, in an elevated or closed session, the elevated floor, not bare base. A discount below the session floor is deliberately excluded because it invites wash flow that farms cheap rebalancing against the LP.
-- **Adverse otherwise**: `deviationMult = f(|dev|)` evaluated at the estimated post-swap deviation (midpoint of pre and post is acceptable), so the fee scales with the gap the swap actually captures.
+**The defect r7 fixes.** Loss-versus-rebalancing arbitrage is, by definition, price-restoring: the
+arbitrageur moves the pool *toward* fair value and pockets the difference. The r5/r6 rule exempted
+every restoring trade, so at the moment the reference wakes — Sunday ~20:00 ET for a
+`us_equities_24/5` feed — the gap-capturing swap scored `deviationMult = 1.0`, and because the print
+that revealed the gap was fresh, `stalenessMult = 1.0` as well. Both multipliers sat at their minimum
+at the most toxic instant of the week, leaving `fee = floor(session)`. At the Monday open it resolved
+to `baseFee`, identical to the unhooked pool. The surcharge never fired on the trade the hook exists
+to price.
 
-This closes both loopholes the pre-swap rule left open: at Friday close (deviation ≈ 0) a single optimally sized Monday swap is adverse and pays proportionally to the gap it takes, rather than `f(0) = 1.0` regardless of size; and a "restoring" buy sized to blast through the reference fails the `|post − ref| < |pre − ref|` test, so the overshoot is automatically adverse. This is StableSurge's insight (tax the side moving away from the peg) applied to the last official close, made size-aware. It converts the hook from "raise fees at night" into a market-microstructure mechanism: the toxic-flow premium is paid by informed traders and captured by LPs.
+It also compounded: surcharging trades that move the pool *away* from the stale Friday close pins the
+pool to that close, which maximizes the gap waiting at the reference wake — then hands it over at the
+floor rate.
 
-One honest caveat for the README: when the reference is stale, "restoring" means toward the last official close, not toward fundamentals — weekend noise flow pushing the pool back toward a reference that no longer reflects reality gets the cheap rate. This is intrinsic to any stale-reference design; the session floor bounds the damage.
+**The rule.** Direction is still evaluated on an estimated post-swap price (constant-liquidity
+approximation from `amountSpecified`, `sqrtPriceX96`, and active liquidity via `StateLibrary`), and
+the restoring test is still `|post − ref| < |pre − ref|`, so an overshoot through the reference is
+adverse. What changes is that the exemption is qualified by **who created the deviation**:
+
+- **Pool-created deviation** — the pool wandered from a reference that did not move. Closing it is
+  restoring: `deviationMult = 1.0`, fee = `floor(session) × stalenessMult`, capped. Never below the
+  session floor; a discount would invite wash flow farming cheap rebalancing against the LP.
+- **Reference-created deviation** — the reference moved and the pool has not caught up. Closing it
+  is the arbitrage, and it pays `f(·)` regardless of direction.
+- **Adverse in the ordinary sense** — a swap increasing `|pool − ref|` pays `f(·)` as before.
+
+Distinguishing the two requires one additional stored value: the pool price observed alongside the
+last known reference. Deviation that appeared while the reference was static is pool-created;
+deviation that appeared across a reference move is not.
+
+**Consequence for the fee's shape.** Cheap through the dark window, spiking at the reference wake,
+decaying over a short window. That is close to the shape the live prior art already ships, reached
+from this project's own premises rather than borrowed. It changes Workstream A's job from *choosing
+the shape* to *sizing the spike*, and it removes "opposite thesis" from the novelty argument (§14).
+
+**Consequence for Workstream C.** The control cannot be "hook versus unprotected", which compares a
+closed-session floor against 5bps and produces a large number that means nothing. The honest control
+is a **static fee equal to the hook's average realized fee**, and the headline metric is **LVR avoided
+versus fee revenue forgone** — because a hook that merely declines toxic flow to sibling pools will
+report near-100% LP retention with volume at zero.
+
+One honest caveat for the README: when the reference is stale, "restoring" still means toward the last
+official print, not toward fundamentals. Weekend noise pushing the pool back toward a stale anchor gets
+the cheap rate, and the mechanism's own pinning effect makes that anchor staler. The session floor
+bounds the damage.
 
 ### 5.5 Post-open decay
 When the session transitions to regular hours and `updatedAt` turns fresh, the pool needs to reprice. Decay applies **only to `deviationMult`**: it is blended toward 1.0 over a short window (v1: 15 minutes, linear) so the pool can absorb the gap without permanently taxing the correcting trades. The session floor and `stalenessMult` are never decayed; a 9:31 halt with a frozen feed still pays the highest floor times staleness, and decay does not begin until `updatedAt` is fresh. Unit test: `test_noDecayWhileFeedFrozenAfterOpen`.
@@ -186,12 +223,12 @@ Stack: Foundry, Uniswap v4-template, Solidity. Python for Workstream A.
 | Schema handling | Production adapter only | Which schema the Robinhood Chain Streams use (not needed for v1) |
 | Stacking | Session sets a floor; `stalenessMult × deviationMult` on top; single `feeCap`. No fourth curve | Resolved |
 | Deviation curve | Piecewise linear with cap, creator-set params | Quadratic for extreme deviations? |
-| Direction | Signed rule on estimated post-swap price: restoring iff `|post − ref| < |pre − ref|` (overshoot through reference is adverse); adverse `f` evaluated at estimated post-swap deviation. Never below the session floor (wash-flow guard) | Resolved (r5) |
+| Direction | Signed rule on estimated post-swap price, **qualified by who created the deviation** (r7 §5.4): pool-created → exempt; reference-created → charged `f(·)` even though restoring; overshoot through the reference → adverse. Never below the session floor | Resolved (r7). Open: the estimate uses current-range liquidity only and can be manipulated within a block; mitigate with an `ε` classification margin and pessimistic liquidity — fail adverse, not restoring |
 | First-trade protection | Adverse fee is size-aware via the constant-liquidity post-swap estimate, so the single optimal Monday swap pays proportionally to the gap it captures | How accurate is the constant-liquidity estimate across tick boundaries, and how much residual protection is `floor × staleness` alone? Fork test (§6C) reports the split |
 | Post-open decay | 15 min linear | Adaptive on volume? |
 | Multiplier | `uiMultiplier()` read on per-block cache miss only; normalize pool price | Resolved |
 | Halts | Covered by frozen-timestamp branch of predicate → highest fee | Should a halt close the pool instead? (v1: no; stay open) |
-| Floor ordering (r6) | Closed session = highest floor | **Contested by live prior art.** Fables prices the weekend as its *cheapest* tier and charges the gap at the reopen via a decaying spike, on the rationale that "the open and its bells are the toxic windows, not the closure." Workstream A measures the quantity that decides it; if the data favours their shape, the floor ordering is a parameter change, not a redesign |
+| Floor ordering (r7) | Closed = highest floor, but the **reference-wake surcharge** (§5.4) now carries most of the reopen protection | Largely settled by r7: pricing reference-created deviation moves this design toward the shape the live prior art already ships. Workstream A's job is **sizing the reopen spike**, not choosing between shapes. The three floors remain independent parameters |
 | Multiplier normalization (r6) | None — pool and feed are both per-token | Resolved empirically Sept 4; re-verify during regular hours |
 | Parameter ownership | Immutable at init | Resolved: governance out of scope |
 
@@ -216,7 +253,10 @@ LeetCode: one problem/day for the window. Ornn article starts Sept 17.
 - [x] **Chainlink equity feed proxy addresses.** DONE Sept 4. Docs render client-side but are backed by `reference-data-directory.vercel.app/feeds-robinhood-mainnet.json` (57 feeds). SPY/NVDA/TSLA/AAPL + USDG proxies verified live; all 8 decimals, heartbeat 86400s, threshold 0.5%, tagged `us_equities_24/5`. Addresses in `docs/verified-onchain.md` §1
 - [x] `latestRoundData()` returns a usable `updatedAt` on chain 4663 — DONE Sept 4, and round-history walks establish the 24/5 liveness pattern (§2). Schema / `marketStatus` remains a production footnote, not a build gate
 - [x] **Fables** (live ve(3,3) DEX on this chain): DOES condition on the trading calendar. Source verified on Sourcify; full analysis in `docs/prior-art-fables.md`. §14 rewritten accordingly
-- [ ] Levery's mechanism (UF-subsidized "toxic arbitrage mitigation" hook): confirm whether it also conditions on market hours
+- [x] Levery — no collision: oracle divergence magnitude only, no calendar, no `updatedAt` conditioning, no equities
+- [x] Prior-art sweep extended to Ballast, StockShield, FLock — see `docs/prior-art-verification.md`
+- [ ] Permissioned Pools deployment status on chain 4663 (unconfirmed either way)
+- [ ] Re-verify the multiplier convention during regular hours — Tuesday Sept 8 (Monday is Labor Day)
 - [ ] Permissioned Pools: read the spec; confirm it does not express session state
 - [x] ETHOnline rules — DONE. Classic "From Scratch" track: project code starts at kickoff; public libraries/boilerplate permitted; pre-existing work must be **disclosed in writing** to ETHGlobal and in the submission; frequent commits required (single large commits are "default assumed unqualified"); repo must remain public. **Submission deadline Sunday Sept 13, 12:00 pm EDT** — not Sept 16. A ≤4-minute video is required and speed-ups are disqualifying
 - [ ] File the pre-work disclosure (design doc, README, v4-template scaffold) with ETHGlobal before building
@@ -242,15 +282,52 @@ Stretch: Uniswap Foundation prize; Hook Design Lab conversation; a Uniswap engin
 
 Dynamic fees are commodity infrastructure. Every production LVR-mitigation design surveyed infers toxicity from a signal endogenous to continuous markets: realized volatility, deviation from a live reference, priority fees, inventory imbalance, or auction competition. For a tokenized equity, all of these read "calm" on a Sunday afternoon and quote their minimum fee at the moment the pool is maximally stale.
 
-**Closest prior art, stated first: Fables.** Verified on-chain Sept 4 2026; full evidence in `docs/prior-art-fables.md`. Fables is a hook-native ve(3,3) DEX live on Robinhood Chain whose tokenized-stock pools price fees off a US-equity trading calendar inside a `beforeSwap`-only hook. The overlap is substantial and is not to be glossed: same problem, same chain, same hook shape and permission set, same conditioning variable, session-tiered floors, direction asymmetry, a decay window, a fee cap, and pools that stay open. **Any claim that calendar-conditioned AMM fees are unoccupied territory is false.** Other neighbours: `trading-days` (calendar-aware, but hard-reverts outside NYSE hours, sacrificing all off-hours flow); Stork/Ostium (bespoke per-asset market-hours pipelines for a peer-to-pool perp venue with an active risk manager, hedging rails, and funding to compensate its vault — a passive spot AMM LP has none of that).
+**Prior art, stated first.** Five hooks surveyed as of Sept 4 2026, each verified from source or
+on-chain bytecode; evidence in `docs/prior-art-fables.md` and `docs/prior-art-verification.md`.
 
-ClosingBell's contribution is therefore not the calendar. It is three things:
+- **Fables** — live ve(3,3) DEX on Robinhood Chain. Calendar-conditioned stock fees in a
+  `beforeSwap`-only hook. Reads no price of any kind; `_autonomousFee` ignores its `SwapParams` and
+  returns a pure function of `block.timestamp`. Reference-price information enters only through an
+  authority-gated `pokeFee` override, currently inactive on every stock pool.
+- **Ballast** (`dny-777/ballast`) — surcharges swaps moving the pool away from an oracle reference,
+  discounts those moving toward it, citing Milionis/Moallemi/Roughgarden and crediting Uniswap Hook
+  Incubator's taught "Nezlobin's Directional Fee." No calendar. **Reverts** on staleness.
+- **StockShield** (`ayush18pop/stockshield.eth`) — seven session regimes with per-regime staleness
+  bounds, the closest thing to a joint claim. Staleness is a **revert gate**, never a fee input
+  (`MAX_STALENESS_CORE = 60`, which would revert every weekend swap against a `us_equities_24/5`
+  feed), and the fee is ECDSA-signed off-chain, the hook only bounds-checking it.
+- **FLock** (`FLock-io/flock-v4-hook`) — calendar-raised fees for stock-token pools on this chain,
+  from this argument ("the AP cannot mint stock tokens, LPs carry the gap risk alone"). Created
+  2026-09-04 09:24 UTC: **concurrent independent work, not prior art.** No reference price.
+- **Levery** — oracle-to-pool divergence drives fees, plus AML/KYC in hook callbacks. Magnitude only:
+  no calendar, no `updatedAt` conditioning, no equities. Fee engine closed-source, so this is "no
+  public evidence" rather than proof.
 
-1. **Trustless on-chain conditioning where the live implementation uses a trusted operator.** Fables' fee is a pure function of `block.timestamp`; its `_autonomousFee` ignores its `SwapParams` entirely. Reference-price information enters only out-of-band, through an authority-gated `pokeFee` override (TTL ≤ 72h) that their own docs describe as possibly using "reference-price divergence" — and which is currently inactive on every tokenized-stock pool. ClosingBell reads the reference on every swap and prices staleness and signed deviation from it, with no privileged party.
-2. **Halt and frozen-feed detection, which a calendar cannot do.** Fables' docs concede it: "A calendar can miss an exceptional closure." Their remedy is a manual admin bitmap capped at ten forced closures per month. A Tuesday-10am halt that freezes the feed leaves them charging their cheapest weekday floor against a stale reference; ClosingBell's three-part liveness predicate resolves the same state to the highest floor, automatically, per swap.
-3. **An opposite and falsifiable thesis about where weekend toxicity is realized.** On every Fables equity pool `closedFloor < openFloor` — the weekend is their *cheapest* tier, with gap risk charged at the reopen via a decaying spike, on the stated rationale that "the open and its bells are the toxic windows, not the closure." ClosingBell prices the dark window itself as the highest floor. These cannot both be right, and Workstream A measures exactly the quantity that decides it. Adjudicating it with data is a contribution whichever way it falls.
+**Two claims r6 made are hereby retracted.** Calendar-conditioned fees for tokenized stocks are
+occupied — Fables ships them live on this chain. Direction asymmetry relative to an oracle reference
+is occupied *and taught* — Ballast implements it from UHI curriculum. Neither is claimed. The
+"opposite falsifiable thesis" framing is also withdrawn: Fables' own `closedSpike` docstring calls
+the post-weekend open "the most toxic — a whole weekend of off-venue price discovery the pool is
+blind to," their source states "No ordering is imposed on the three floors," and r7's own §5.4 fix
+moves this design toward the same shape. They agree the weekend accumulates the information; the
+disagreement is only about where it is charged.
 
-Secondary distinctions, each verified: parameters immutable at initialization versus admin-mutable via AccessManaged; half-days modelled versus not modelled; ERC-8056 handled on-chain versus frontend-only (a multiplier mismatch blanks their UI while the pool keeps trading unadjusted); MIT and standalone-for-any-v4-pool versus `UNLICENSED` and welded into one DEX. (Caveat retained: this is an argument from the landscape as verified on Sept 4 2026, not proof of absence; 489 distinct non-zero hook addresses are live on Robinhood Chain, most undocumented.)
+**What survives, narrow and falsifiable:**
+
+> Of the five hooks surveyed on Sept 4 2026, none prices reference-price staleness as a continuous
+> fee input. The two that read `updatedAt` — Ballast, StockShield — revert on it. The two that price
+> an equity calendar — Fables, FLock — carry no reference price, and therefore cannot detect a market
+> that is nominally open while its feed is frozen. ClosingBell reads the feed on every swap, converts
+> staleness into fee rather than into a revert, and forms a liveness predicate from calendar and feed
+> jointly that resolves open-but-frozen to the highest floor.
+
+Secondary, each verified: parameters `immutable` in the constructor versus admin-mutable via
+AccessManaged; half-days modelled versus not; ERC-8056 handled on-chain versus frontend-only; MIT and
+deployable on any v4 pool versus `UNLICENSED` and welded into one DEX. Ballast and StockShield carry
+no licence file — cited, never copied.
+
+Caveat: a survey of five named hooks on one date, not proof of absence; 489 distinct non-zero hook
+addresses are live on Robinhood Chain, most undocumented.
 
 **Anticipated critique, answered up front: "a cap that big is a soft halt with extra steps."** For the fee to matter against the documented 3 to 5% weekend gaps, `feeCap` must be of that order — v1 default in the 300 to 500 bps range, creator-set at initialization. At that cap, adverse flow near gap size is largely priced out, and that is the mechanism working, not the pool closing: the cap binds only for the toxic direction and size. Uninformed flow pays moderate session-floor fees and fills all weekend; restoring flow pays `floor × staleness` and fills; the calendar-aware design that reverts (`trading-days`) blocks every one of those trades. Note that Fables also keeps pools open, so "stays open" is common ground with the live prior art rather than a differentiator — the contrast that carries weight is against `trading-days`. "Open" means open to everyone except the one counterparty the fee is designed to price.
 
@@ -273,3 +350,6 @@ This proposal lives in the repo at `docs/proposal.md`. ETHOnline's requirement i
 - **Fables** — closest prior art; contracts verified on Sourcify (chain 4663), analysis in `docs/prior-art-fables.md`
 - Chainlink Robinhood tokenized-equity feeds page (off-hours `updatedAt` guidance) and the `feeds-robinhood-mainnet.json` reference-data directory
 - On-chain verification log: `docs/verified-onchain.md`
+- Pre-build adversarial review: `docs/pre-build-review.md`; prior-art verification: `docs/prior-art-verification.md`
+- Ballast (`dny-777/ballast`), StockShield (`ayush18pop/stockshield.eth`), FLock (`FLock-io/flock-v4-hook`) — surveyed hooks
+- Uniswap Permissioned Pools (`Uniswap/v4-hooks-public`) — composes with, does not compete
