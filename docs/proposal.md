@@ -1,6 +1,6 @@
 # Project Proposal (final): ClosingBell Hook
 
-**A Uniswap v4 hook that protects LPs in tokenized-stock pools by pricing fees off the underlying market's trading calendar and reference-price staleness, jointly, while keeping the pool open.**
+**A Uniswap v4 hook that protects LPs in tokenized-stock pools by pricing fees off the underlying market's trading calendar and its live reference price, jointly, while keeping the pool open.**
 
 Target: ETHOnline 2026 (Sept 4 to 16), Uniswap Foundation track, "Best Uniswap Stack Contribution"
 Builder: Neil Khedekar (0xtitan6)
@@ -87,6 +87,9 @@ fee = min( floor(session) × stalenessMult(updatedAt) × deviationMult, feeCap )
 Session sets the floor. Staleness and signed deviation are multipliers on top of that floor. One cap. Regular-hours live with fresh price and zero deviation resolves to exactly base. A restoring swap pays `floor(session) × stalenessMult`, capped: that is base only when the session floor is base; in an elevated or closed session it is the elevated floor times staleness, which is the rule, not a discount.
 
 ### 5.2 Reference-price staleness
+
+> **Overridden post-freeze by `docs/build-notes.md` B1/B2.** On these feeds (0.5% threshold, 86400s heartbeat) `updatedAt` cannot distinguish a quiet market from a frozen one, so the ramp below is driven by time since session close (`MarketHours.lastCloseAt`), not by print age. `updatedAt` survives only as a dead-feed safety net inside `isLive`. The text below is retained as the r7 record.
+
 Time since the last authoritative print (`updatedAt`). `stalenessMult` rises from 1.0 with elapsed time, capped, and multiplies the session floor. This is the HOT/Valantis "time since last update" idea applied as a staleness tax, and it is what makes Sunday afternoon expensive even when nothing has moved yet.
 
 ### 5.3 Deviation from reference
@@ -314,12 +317,19 @@ disagreement is only about where it is charged.
 
 **What survives, narrow and falsifiable:**
 
-> Of the five hooks surveyed on Sept 4 2026, none prices reference-price staleness as a continuous
-> fee input. The two that read `updatedAt` — Ballast, StockShield — revert on it. The two that price
-> an equity calendar — Fables, FLock — carry no reference price, and therefore cannot detect a market
-> that is nominally open while its feed is frozen. ClosingBell reads the feed on every swap, converts
-> staleness into fee rather than into a revert, and forms a liveness predicate from calendar and feed
-> jointly that resolves open-but-frozen to the highest floor.
+> Of the five hooks surveyed on Sept 4 2026, ClosingBell is the only one that computes its fee
+> on-chain from both a trading calendar and a live reference price. Fables and FLock price the
+> calendar and read no reference. Ballast and Levery read a reference and have no calendar.
+> StockShield has both, but its staleness is a revert gate and its fee is ECDSA-signed off-chain.
+> The sharpest mechanism-level difference is §5.4's deviation attribution: no surveyed hook splits
+> deviation by who created it, and Ballast — implementing the taught directional fee — discounts the
+> reopen arbitrage 2×.
+>
+> Retracted after this project's own measurements (`docs/build-notes.md` B1, B2): that `updatedAt`
+> detects halts on these feeds — a quiet Monday and a halted one are indistinguishable through it on
+> a 0.5%-threshold / 86400s-heartbeat feed — and that the fee ramp is driven by feed staleness. The
+> ramp is calendar-derived; the feed drives deviation and a dead-feed safety net. `marketStatus`-based
+> halt detection remains a Data Streams feature, behind the same adapter seam.
 
 Secondary, each verified: parameters `immutable` in the constructor versus admin-mutable via
 AccessManaged; half-days modelled versus not; ERC-8056 handled on-chain versus frontend-only; MIT and

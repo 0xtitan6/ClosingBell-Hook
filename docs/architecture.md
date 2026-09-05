@@ -1,7 +1,8 @@
 # Architecture
 
 How ClosingBell is put together, why it is split this way, and what each piece owes the others.
-Spec is `proposal.md` (r6). On-chain facts referenced here are verified in `verified-onchain.md`.
+Spec is `proposal.md` (r7). On-chain facts referenced here are verified in `verified-onchain.md`.
+Post-freeze corrections are in `build-notes.md` (B1–B3) and are already folded into this document.
 
 ---
 
@@ -32,7 +33,7 @@ Spec is `proposal.md` (r6). On-chain facts referenced here are verified in `veri
                                         ▼
                                    FeeCurve
                     floor(session, isLive) × stalenessMult × deviationMult
-                              (deviationMult decayed post-open)
+                     (both ramps calendar-driven — see §4, build note B2)
                                    → min(…, feeCap)
                                         │
                                         ▼
@@ -100,6 +101,11 @@ import. Decide this first; everything else follows from it.
 ### `MarketHours.sol` — pure
 - `sessionAt(uint256 tsUTC) → Session` — UTC→ET with US DST, weekday, session windows, holiday table
 - `calendarOpen(uint256) → bool` — `sessionAt(ts) != Closed`
+- `lastCloseAt(uint256 tsUTC) → uint256` — start of the current dark window, or `tsUTC` if open
+- `lastOpenAt(uint256 tsUTC) → uint256` — most recent session reopen; drives `decayWindow`
+
+  Both are pure derivations of the calendar — no state, no feed read. They are what makes B2's
+  "calendar time drives ramps" implementable at zero gas cost beyond the lookup.
 - internals: `_isDST`, `_dayOfWeek`, `_isHoliday`, and the holiday table as data — a **packed
   bitmap indexed by day-number** or a binary search, never a linear scan: this runs on every swap
   in the pool, forever
@@ -109,13 +115,18 @@ Half-days are in scope (the live prior art does not model them; see `prior-art-f
 ### `FeeCurve.sol` — pure
 - `Params` — the creator-set surface (README "Parameters")
 - `floorFor(Params, Session, bool isLive) → uint24`
-- `stalenessMult(Params, updatedAt, nowTs) → uint256` (1e18)
+- `stalenessMult(Params, Session, lastCloseTs, nowTs) → uint256` (1e18) — ramps on time since
+  **session close**, not time since last print. Raw print age is unusable as a fee input on these
+  feeds: a 0.5%-threshold / 86400s-heartbeat feed goes 24h without printing across a normal quiet
+  regular session (measured, `verified-onchain.md` §2), so print age cannot distinguish a quiet
+  market from a dead one. See build note B1
 - `isRestoring(preDev, postDev, refMoved) → bool` — the signed rule, **restricted to pool-created
   deviation**. Arbitrage toward a reference that just moved is definitionally restoring, so an
   unrestricted rule exempts the exact trade the hook exists to price (see `pre-build-review.md` §0).
   Deviation the reference created is charged `f(·)`; deviation the pool created keeps the exemption
 - `deviationMult(Params, postDev, bool restoring) → uint256`
-- `decayedDeviationMult(Params, rawMult, freshSince, nowTs) → uint256`
+- `decayedDeviationMult(Params, rawMult, lastOpenTs, nowTs) → uint256` — window measured from the
+  calendar reopen, not from an observed stale→fresh transition (§5)
 - `computeFee(...) → uint24` — single entry point composing `min(floor × s × d, cap)`
 
 ### `IMarketStateAdapter.sol`
@@ -140,6 +151,13 @@ Guard the no-code case explicitly (`feed.code.length == 0` returns success with 
 On a failed read, return the **last known good price**, not zero — a frozen feed should still be
 deviated against its last real reference, which is exactly the weekend case. Zero only when the
 adapter has never seen a good price, and the hook must then price on floor x staleness alone.
+
+**Size `maxStaleness` above the 86400s heartbeat.** It is a dead-feed safety net, not a halt
+detector — anything tight enough to catch a 5–15 minute LULD halt fires on quiet regular sessions
+instead, charging `closedFloor` at peak liquidity. Halts are covered by `deviationMult`: the
+reference freezes, the token keeps trading, the pool drifts off it and the surcharge climbs
+unaided. Real halt detection arrives with the Data Streams `marketStatus` adapter, behind this same
+seam. Build note B1.
 
 `quoteFeed == address(0)` for dollar-quote pools; set for stock/SPY, where deviation compares the
 pool ratio to `stockFeed / quotePrice` and `isLive` gains a quote-freshness term.
@@ -174,9 +192,8 @@ into existence with this hook. No `beforeInitialize` bit is needed.
 
 ## 5. State
 
-The hook is almost stateless. It holds one mutable value:
-
-**Target: none.** The hook should hold no mutable state on the swap path.
+**The hook holds no mutable state.** Nothing on the swap path is written; `beforeSwap` contains no
+SSTORE.
 
 The r5 design implied a `freshSince[poolId]` marking the feed's stale to fresh transition, to drive
 post-open decay. Two problems: it is written on the permissionless swap path, so an attacker chooses
@@ -184,6 +201,11 @@ when the decay window falls; and decaying `deviationMult` toward 1.0 cannot make
 cheaper than the 1.0 it already pays, so the window's stated purpose is not what it does. Derive the
 decay window from the calendar instead, and repoint it at the reference-jump surcharge that F1
 introduces. That removes the only SSTORE from `beforeSwap`.
+
+The same reasoning applies to `stalenessMult`, and B1 gives it a second, independent justification.
+Stated once and applied everywhere:
+
+> **Calendar time drives ramps. Feed time drives liveness only.**
 
 Per-pool configuration is constructor-set and `immutable` (see §6), so it is code, not storage.
 
@@ -250,7 +272,8 @@ Dependency order, which is also risk order:
 
 1. `IMarketStateAdapter.sol` — types first; everything imports them, and its totality contract is
    what the adapter is later written against
-2. `MarketHours.sol` + unit tests — zero dependencies, nothing can block it
+2. `MarketHours.sol` + unit tests — zero dependencies, nothing can block it. Includes
+   `lastCloseAt`/`lastOpenAt`, which `FeeCurve` needs in step 3 (B2)
 3. `FeeCurve.sol` + unit tests — the mechanism; the file to write by hand
 4. Mock adapter + `ClosingBellHook.sol` + integration tests
 5. `ChainlinkEquityAdapter.sol` — last, because it is the only piece gated on external facts
