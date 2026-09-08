@@ -142,3 +142,32 @@ Also from the review, mechanical: `computeFee` rounds up and clamps to `MAX_LP_F
 `feeCap`; Good Friday is computed (Gregorian computus) rather than tabled; `Session.Closed` is the
 enum's zero value so a zeroed `MarketState` is the fail-safe regime.
 
+---
+
+## B6 — Second-pass fixes to the F1 mechanism
+
+**Refines:** B4 (`referenceMoved`) and `FeeCurve.deviationMult`.
+
+The Sept 8 second review found two holes in B4 as first written; both were in the library.
+
+*The surcharge was evaluated on where the swap ends.* An arbitrage that lands exactly on the new
+reference ends at zero deviation and was charged 1.0x — the floor. `deviationMult` now takes both
+endpoints and charges on `max(|preDev|, |postDev|)`: a swap that takes a 3% gap pays for 3%
+whether it stops short or lands on the reference. (The path integral, F2, remains deferred.)
+
+*"Closer to the old print than the new" exempted half the gap.* Once the pool passed the midpoint
+between the two prints, `referenceMoved` flipped false and the remaining half was restoring at
+the floor — two transactions instead of one recovered ~40% of the surcharge. "Still tracking the
+old print" now means the pool lies **between** the two prints (inclusive). The surcharge falls as
+the gap closes but reaches the floor only when the gap is actually closed. A pool that drifted
+outside the band on its own is unaffected.
+
+Also: unknown history (`prevPrice == 0`) now counts as moved — when in doubt, charge (F3's "fail
+adverse"). `abs(int256.min)` saturates instead of reverting. `MarketState` gains `prevQuotePrice`
+so a quote-only move on a stock/SPY pool is visible.
+
+**Adapter contract for `prevPrice` (residuals the library cannot fix):** it must be the last print
+that *differed* from the current one — skipping heartbeat re-prints — and, right after a closure,
+the last print at or before the close, so a reopen followed by a retrace print does not read as
+"no move". Documented on the struct; enforced in `ChainlinkEquityAdapter`.
+

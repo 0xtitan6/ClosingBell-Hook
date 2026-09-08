@@ -54,7 +54,7 @@ a swap — see the adapter totality contract in §4.
 | File | Kind | Responsibility |
 |---|---|---|
 | `ClosingBellHook.sol` | hook contract | Orchestration only: gather inputs, call `FeeCurve`, return the override |
-| `FeeCurve.sol` | pure library | All fee math: floors, staleness, signed deviation, decay, cap |
+| `FeeCurve.sol` | pure library | All fee math: floors, staleness, reference-moved test, signed deviation, cap |
 | `MarketHours.sol` | pure library | Timestamp → `Session`. Calendar only |
 | `IMarketStateAdapter.sol` | interface + types | The oracle seam. Owns the `Session` enum and `MarketState` struct |
 | `ChainlinkEquityAdapter.sol` | contract | v1 oracle: Data Feeds, liveness predicate, optional quote leg |
@@ -73,15 +73,17 @@ The adapter quarantines every external call.
 never learns how it was produced:
 
 ```solidity
-enum Session { Regular, Extended, Overnight, Closed }
+enum Session { Closed, Regular, Extended, Overnight }   // Closed = 0: zeroed state is fail-safe
 
 struct MarketState {
     Session session;
     bool    isLive;        // calendarOpen && fresh && plausible && (quote fresh) && !oraclePaused
-    uint256 price;         // stock reference, 1e18
+    uint256 price;         // stock reference, 1e18; 0 on a failed read
+    uint256 prevPrice;     // last DIFFERENT print the pool could track (B6); 0 = unknown = treated as moved
     uint256 updatedAt;     // last authoritative print for the stock feed
     bool    hasQuoteFeed;  // true for non-dollar quote legs (stock/SPY)
     uint256 quotePrice;    // meaningful only when hasQuoteFeed
+    uint256 prevQuotePrice;// same contract as prevPrice, for the quote leg
 }
 ```
 
@@ -99,15 +101,12 @@ import. Decide this first; everything else follows from it.
 ## 4. Function inventory
 
 ### `MarketHours.sol` — pure
-- `sessionAt(uint256 tsUTC) → Session` — UTC→ET with US DST, weekday, session windows, holiday table
-- `calendarOpen(uint256) → bool` — `sessionAt(ts) != Closed`
-- `lastCloseAt(uint256 tsUTC) → uint256` — start of the current dark window, or `tsUTC` if open
+- `calendar(uint256 tsUTC) → (Session, uint256 lastClose)` — the one per-swap call: session, and 20:00 ET on the last trading day if closed (else `tsUTC`)
+- `utcOffset(uint256) → uint256` — 4h/5h, exposed for tests
 
   Both are pure derivations of the calendar — no state, no feed read. They are what makes B2's
   "calendar time drives ramps" implementable at zero gas cost beyond the lookup.
-- internals: `_isDST`, `_dayOfWeek`, `_isHoliday`, and the holiday table as data — a **packed
-  bitmap indexed by day-number** or a binary search, never a linear scan: this runs on every swap
-  in the pool, forever
+- internals: `_session`, `_dayInfo` (trading day + close time in one decode; holidays are NYSE **rules** dispatched by month, Good Friday by computus — no table), `_observed`, `_nth`
 
 Half-days are in scope (the live prior art does not model them; see `prior-art-fables.md`).
 
@@ -119,11 +118,11 @@ Half-days are in scope (the live prior art does not model them; see `prior-art-f
   feeds: a 0.5%-threshold / 86400s-heartbeat feed goes 24h without printing across a normal quiet
   regular session (measured, `verified-onchain.md` §2), so print age cannot distinguish a quiet
   market from a dead one. See build note B1
-- `isRestoring(preDev, postDev, refMoved) → bool` — the signed rule, **restricted to pool-created
-  deviation**. Arbitrage toward a reference that just moved is definitionally restoring, so an
+- `referenceMoved(pool, ref, prevRef) → bool` — stateless: pool lies between the previous and current print (B4/B6)
+- `isRestoring(int256 preDev, int256 postDev, refMoved) → bool` — signed; same side, strictly smaller, and **pool-created only**. Arbitrage toward a reference that just moved is definitionally restoring, so an
   unrestricted rule exempts the exact trade the hook exists to price (see `pre-build-review.md` §0).
   Deviation the reference created is charged `f(·)`; deviation the pool created keeps the exemption
-- `deviationMult(Params, postDev, bool restoring) → uint256`
+- `deviationMult(Params, |preDev|, |postDev|, bool restoring) → uint256` — charged on the larger endpoint (B6)
 - (no time decay — build-notes.md B4)
   calendar reopen, not from an observed stale→fresh transition (§5)
 - `computeFee(...) → uint24` — single entry point composing `min(floor × s × d, cap)`

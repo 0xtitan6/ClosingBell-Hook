@@ -7,7 +7,8 @@ import {MarketHours} from "../src/MarketHours.sol";
 import {Session} from "../src/IMarketStateAdapter.sol";
 
 /// Fixed points for the NYSE calendar. Timestamps are built independently of the library under
-/// test: ET wall-clock + a hardcoded offset (EDT 4h between 2026-03-08 and 2026-11-01, else EST 5h).
+/// test: ET wall-clock + a hardcoded offset (EDT 4h / EST 5h chosen per date; every date used is
+/// clear of a DST switch, and noon-ish timestamps stay in-session even if an offset were off by 1h).
 contract MarketHoursTest is Test {
     uint256 constant EDT = 4 hours;
     uint256 constant EST = 5 hours;
@@ -168,20 +169,20 @@ contract MarketHoursTest is Test {
     function testFuzz_calendar_isTotal(uint256 ts) public pure {
         ts = bound(ts, et(2026, 1, 1, 0, 0, EST), et(2030, 12, 31, 23, 59, EST));
         (Session s, uint256 lc) = MarketHours.calendar(ts);
-        assertTrue(uint8(s) <= uint8(Session.Overnight));
         assertLe(lc, ts, "lastClose <= ts");
         if (s != Session.Closed) assertEq(lc, ts, "open => lastClose == ts");
     }
 
-    /// Hot-path gas. Open weekdays are flat (~4k, no walk-back); Closed pays the walk-back
-    /// to the last trading day (~10k weekend, ~12k over a holiday weekend); March/November pay
-    /// the DST rule (~+1.5k). All four are per-swap costs the hook can see.
+    /// Hot-path gas. Open weekdays ~3-4k (no walk-back); March/November pay the DST rule (~5.5-6.5k,
+    /// November also evaluates Thanksgiving twice); Closed pays the walk-back to the last trading
+    /// day (~8k weekend, ~12k over a holiday weekend). All are per-swap costs the hook can see.
     function test_gas_calendar_byBranch() public view {
         uint256 g;
         g = gasleft(); MarketHours.calendar(et(2026, 8, 31, 12, 0, EDT)); assertLt(g - gasleft(), 6_000, "Mon regular");
         g = gasleft(); MarketHours.calendar(et(2026, 9, 4, 12, 0, EDT));  assertLt(g - gasleft(), 6_000, "Fri regular");
         g = gasleft(); MarketHours.calendar(et(2026, 9, 4, 2, 0, EDT));   assertLt(g - gasleft(), 6_000, "Fri overnight");
         g = gasleft(); MarketHours.calendar(et(2026, 3, 20, 12, 0, EDT)); assertLt(g - gasleft(), 8_000, "March (DST rule)");
+        g = gasleft(); MarketHours.calendar(et(2026, 11, 18, 12, 0, EST)); assertLt(g - gasleft(), 9_000, "November (DST rule + Thanksgiving x2)");
         g = gasleft(); MarketHours.calendar(et(2026, 9, 5, 12, 0, EDT));  assertLt(g - gasleft(), 14_000, "Sat closed");
         g = gasleft(); MarketHours.calendar(et(2026, 9, 7, 12, 0, EDT));  assertLt(g - gasleft(), 16_000, "Labor Day (3-day walk)");
     }
@@ -311,6 +312,20 @@ contract MarketHoursTest is Test {
         assertEq(lastCloseAt(fri), fri, "open");
         assertSession(et(2026, 11, 26, 21, 0, EST), Session.Overnight, "Thanksgiving 21:00 = Fri overnight");
         assertSession(et(2026, 11, 27, 14, 0, EST), Session.Extended, "13:00 early close");
+    }
+
+    function test_yearBoundary() public pure {
+        // Thu Dec 31 2026 evening looks at Fri Jan 1 2027 — a holiday — so the overnight is Closed.
+        assertSession(et(2026, 12, 31, 21, 0, EST), Session.Closed, "NYE 2026 -> New Year's is a holiday");
+        assertSession(et(2027, 1, 1, 2, 0, EST), Session.Closed, "Jan 1 2027 02:00");
+        assertSession(et(2027, 1, 3, 21, 0, EST), Session.Overnight, "Sun Jan 3 2027 -> Mon Jan 4 trades");
+        // Fri Dec 31 2027 evening: Jan 1 2028 is a Saturday. Weekend, Closed; and Dec 31 itself traded.
+        assertSession(et(2027, 12, 31, 15, 0, EST), Session.Regular, "Dec 31 2027 open (no observance)");
+        assertSession(et(2027, 12, 31, 21, 0, EST), Session.Closed, "NYE 2027 -> Saturday");
+        assertEq(lastCloseAt(et(2028, 1, 1, 12, 0, EST)), et(2027, 12, 31, 20, 0, EST), "lastClose crosses the year");
+        // Sun Dec 31 2028 evening: Mon Jan 1 2029 is New Year's (Monday) — Closed straight through.
+        assertSession(et(2028, 12, 31, 21, 0, EST), Session.Closed, "NYE 2028 -> Mon Jan 1 2029 holiday");
+        assertEq(lastCloseAt(et(2029, 1, 1, 12, 0, EST)), et(2028, 12, 29, 20, 0, EST), "back to Fri Dec 29 2028");
     }
 
     // ── properties (fuzz) ───────────────────────────────────────────────────────

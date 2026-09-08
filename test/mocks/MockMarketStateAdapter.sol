@@ -16,7 +16,8 @@ contract MockMarketStateAdapter is IMarketStateAdapter {
             prevPrice: 100e18,
             updatedAt: block.timestamp,
             hasQuoteFeed: false,
-            quotePrice: 0
+            quotePrice: 0,
+            prevQuotePrice: 0
         });
     }
 
@@ -57,9 +58,10 @@ contract MockMarketStateAdapter is IMarketStateAdapter {
         state.updatedAt = t;
     }
 
-    function setQuote(bool has, uint256 quotePrice) external {
+    function setQuote(bool has, uint256 quotePrice, uint256 prevQuotePrice) external {
         state.hasQuoteFeed = has;
         state.quotePrice = quotePrice;
+        state.prevQuotePrice = prevQuotePrice;
     }
 
     /// @notice Simulate a dead feed: price 0, not live.

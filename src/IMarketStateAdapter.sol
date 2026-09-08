@@ -10,10 +10,15 @@ struct MarketState {
     Session session; // market-wide: are we in regular hours, after hours, or closed?
     bool isLive; // can the price below be trusted? false if the feed is dead or paused
     uint256 price; // the stock's reference price, 1e18 units; 0 if the feed could not be read
-    uint256 prevPrice; // the feed's previous print, so the hook can tell a fresh move from an old gap; 0 if unknown
+    // The last print that was DIFFERENT from `price` and that the pool could have been tracking,
+    // so the hook can tell a fresh reference move from a gap the pool drifted into on its own.
+    // Adapter contract: skip repeated identical prints (heartbeats); after a closure, use the last
+    // print at or before the close. 0 if unknown — the hook then treats the reference as moved.
+    uint256 prevPrice;
     uint256 updatedAt; // when the feed last printed
     bool hasQuoteFeed; // true when the pool's other token is not a dollar (e.g. stock/SPY)
     uint256 quotePrice; // that token's reference price, 1e18; only meaningful if hasQuoteFeed
+    uint256 prevQuotePrice; // its previous different print, same contract as prevPrice; only if hasQuoteFeed
 }
 
 /// @notice The oracle boundary. The hook reads a `MarketState` and never needs to know where it

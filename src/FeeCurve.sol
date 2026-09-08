@@ -44,12 +44,15 @@ library FeeCurve {
         return m > p.stalenessMax ? p.stalenessMax : m;
     }
 
-    /// @notice True when the reference price moved and the pool has not caught up yet — i.e. the
-    ///         pool is still closer to the previous print than to the current one.
-    ///         Uses feed history only, so there is no stored state for a trader to reset.
+    /// @notice True when the reference price moved and the pool has not finished following it —
+    ///         i.e. the pool sits between the previous print and the current one. Uses feed
+    ///         history only, so there is no stored state for a trader to reset. Unknown history
+    ///         (prevRef == 0) counts as moved: when in doubt, charge.
     function referenceMoved(uint256 poolPrice, uint256 ref, uint256 prevRef) internal pure returns (bool) {
-        if (prevRef == 0 || prevRef == ref) return false;
-        return _absDiff(poolPrice, prevRef) < _absDiff(poolPrice, ref);
+        if (prevRef == 0) return true;
+        if (prevRef == ref) return false;
+        (uint256 lo, uint256 hi) = prevRef < ref ? (prevRef, ref) : (ref, prevRef);
+        return poolPrice >= lo && poolPrice <= hi;
     }
 
     /// @notice Does this swap deserve the cheap rate? Only if it shrinks a gap the pool itself
@@ -62,14 +65,22 @@ library FeeCurve {
         return abs(postDev) < abs(preDev);
     }
 
-    /// @notice 1.0x for restoring swaps. Otherwise rises with how far from the reference the swap
-    ///         leaves the pool: one slope up to the kink, a steeper one beyond it.
-    ///         Capped at MAX_DEV so it can never overflow and block a swap.
-    function deviationMult(Params memory p, uint256 absPostDev, bool restoring) internal pure returns (uint256) {
-        if (restoring || absPostDev == 0) return ONE;
-        if (absPostDev > C.MAX_DEV) absPostDev = C.MAX_DEV;
-        if (absPostDev <= p.devKink) return ONE + absPostDev * p.devSlope1;
-        return ONE + uint256(p.devKink) * p.devSlope1 + (absPostDev - p.devKink) * p.devSlope2;
+    /// @notice 1.0x for restoring swaps. Otherwise rises with the larger of the deviation the swap
+    ///         started from and the one it leaves behind — so an arbitrage that lands exactly on
+    ///         the reference is charged for the whole gap it took, not for the zero it ends at.
+    ///         One slope up to the kink, a steeper one beyond it. Capped at MAX_DEV so it can never
+    ///         overflow and block a swap.
+    function deviationMult(Params memory p, uint256 absPreDev, uint256 absPostDev, bool restoring)
+        internal
+        pure
+        returns (uint256)
+    {
+        if (restoring) return ONE;
+        uint256 dev = absPreDev > absPostDev ? absPreDev : absPostDev;
+        if (dev == 0) return ONE;
+        if (dev > C.MAX_DEV) dev = C.MAX_DEV;
+        if (dev <= p.devKink) return ONE + dev * p.devSlope1;
+        return ONE + uint256(p.devKink) * p.devSlope1 + (dev - p.devKink) * p.devSlope2;
     }
 
     /// @notice Multiply it all together, round up, and cap. Also clamps to the protocol maximum
@@ -84,11 +95,9 @@ library FeeCurve {
         return fee > cap ? uint24(cap) : uint24(fee);
     }
 
+    /// @dev Saturating: abs(type(int256).min) would overflow, and a revert here blocks a swap.
     function abs(int256 x) internal pure returns (uint256) {
+        if (x == type(int256).min) return uint256(type(int256).max);
         return x < 0 ? uint256(-x) : uint256(x);
-    }
-
-    function _absDiff(uint256 a, uint256 b) private pure returns (uint256) {
-        return a > b ? a - b : b - a;
     }
 }
