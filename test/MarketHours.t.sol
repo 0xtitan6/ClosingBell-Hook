@@ -132,7 +132,7 @@ contract MarketHoursTest is Test {
         assertSession(et(2026, 11, 2, 9, 30, EST), Session.Regular, "first EST open");
     }
 
-    // ── lastCloseAt / lastOpenAt ───────────────────────────────────────────────
+    // ── lastCloseAt ───────────────────────────────────────────────────────────────
 
     function test_lastCloseAt_laborDayWeekend() public pure {
         uint256 friClose = et(2026, 9, 4, 20, 0, EDT);
@@ -161,20 +161,6 @@ contract MarketHoursTest is Test {
         assertEq(lastCloseAt(ts2), ts2, "Tue overnight after Labor Day -> ts");
     }
 
-    function test_lastOpenAt() public pure {
-        // Week of Aug 31 – Sep 4 reopened Sun Aug 30 20:00 ET.
-        uint256 reopen = et(2026, 8, 30, 20, 0, EDT);
-        assertEq(MarketHours.lastOpenAt(et(2026, 9, 2, 12, 0, EDT)), reopen, "Wed noon");
-        assertEq(MarketHours.lastOpenAt(et(2026, 8, 31, 1, 0, EDT)), reopen, "Mon 01:00 overnight");
-        assertEq(MarketHours.lastOpenAt(et(2026, 9, 4, 19, 0, EDT)), reopen, "Fri 19:00");
-        // During the Labor Day closure the most recent reopen is still Aug 30.
-        assertEq(MarketHours.lastOpenAt(et(2026, 9, 6, 12, 0, EDT)), reopen, "Sun during closure");
-        // After Labor Day the run Tue–Fri reopened Mon Sep 7 20:00 ET.
-        assertEq(MarketHours.lastOpenAt(et(2026, 9, 8, 12, 0, EDT)), et(2026, 9, 7, 20, 0, EDT), "Tue after Labor Day");
-        // Sunday 20:00 itself is the reopen instant.
-        assertEq(MarketHours.lastOpenAt(et(2026, 9, 13, 20, 0, EDT)), et(2026, 9, 13, 20, 0, EDT), "Sun 20:00 exact");
-    }
-
     // ── totality ────────────────────────────────────────────────────────────────
 
     /// Every timestamp in the supported window maps to exactly one Session, no reverts,
@@ -182,23 +168,39 @@ contract MarketHoursTest is Test {
     function testFuzz_calendar_isTotal(uint256 ts) public pure {
         ts = bound(ts, et(2026, 1, 1, 0, 0, EST), et(2030, 12, 31, 23, 59, EST));
         (Session s, uint256 lc) = MarketHours.calendar(ts);
-        uint256 lo = MarketHours.lastOpenAt(ts);
-        assertTrue(uint8(s) <= uint8(Session.Closed));
+        assertTrue(uint8(s) <= uint8(Session.Overnight));
         assertLe(lc, ts, "lastClose <= ts");
-        if (s == Session.Closed) assertLt(lc, ts, "closed => close strictly before");
-        else assertEq(lc, ts, "open => lastClose == ts");
-        assertLe(lo, ts, "lastOpen <= ts");
-        assertTrue(sessionAt(lo) != Session.Closed, "reopen instant is open");
+        if (s != Session.Closed) assertEq(lc, ts, "open => lastClose == ts");
     }
 
-    /// Hot-path gas: `calendar()` is flat across the week — no walk-back on the per-swap path.
-    function test_gas_calendar_flatAcrossWeek() public view {
-        uint256[3] memory ts = [et(2026, 8, 31, 12, 0, EDT), et(2026, 9, 4, 12, 0, EDT), et(2026, 9, 4, 2, 0, EDT)];
-        for (uint256 i; i < 3; i++) {
-            uint256 g = gasleft();
-            MarketHours.calendar(ts[i]);
-            assertLt(g - gasleft(), 8_000, "calendar() per-swap gas");
-        }
+    /// Hot-path gas. Open weekdays are flat (~4k, no walk-back); Closed pays the walk-back
+    /// to the last trading day (~10k weekend, ~12k over a holiday weekend); March/November pay
+    /// the DST rule (~+1.5k). All four are per-swap costs the hook can see.
+    function test_gas_calendar_byBranch() public view {
+        uint256 g;
+        g = gasleft(); MarketHours.calendar(et(2026, 8, 31, 12, 0, EDT)); assertLt(g - gasleft(), 6_000, "Mon regular");
+        g = gasleft(); MarketHours.calendar(et(2026, 9, 4, 12, 0, EDT));  assertLt(g - gasleft(), 6_000, "Fri regular");
+        g = gasleft(); MarketHours.calendar(et(2026, 9, 4, 2, 0, EDT));   assertLt(g - gasleft(), 6_000, "Fri overnight");
+        g = gasleft(); MarketHours.calendar(et(2026, 3, 20, 12, 0, EDT)); assertLt(g - gasleft(), 8_000, "March (DST rule)");
+        g = gasleft(); MarketHours.calendar(et(2026, 9, 5, 12, 0, EDT));  assertLt(g - gasleft(), 14_000, "Sat closed");
+        g = gasleft(); MarketHours.calendar(et(2026, 9, 7, 12, 0, EDT));  assertLt(g - gasleft(), 16_000, "Labor Day (3-day walk)");
+    }
+
+    function test_bellSecond_closeEqualsTs() public pure {
+        // At exactly Fri 20:00 ET the market is Closed and lastClose == ts (the bell itself).
+        uint256 bell = et(2026, 9, 4, 20, 0, EDT);
+        (Session s, uint256 lc) = MarketHours.calendar(bell);
+        assertTrue(s == Session.Closed);
+        assertEq(lc, bell);
+    }
+
+    function test_goodFriday_computus_beyondTable() public pure {
+        // Rule-derived now, so years past the old 2026–2030 table work. Easter 2031 = Apr 13.
+        assertSession(et(2031, 4, 11, 12, 0, EDT), Session.Closed, "Good Friday 2031");
+        assertSession(et(2031, 4, 10, 12, 0, EDT), Session.Regular, "Maundy Thursday 2031");
+        // Easter 2035 = Mar 25 -> Good Friday Mar 23.
+        assertSession(et(2035, 3, 23, 12, 0, EDT), Session.Closed, "Good Friday 2035");
+        assertSession(et(2040, 3, 30, 12, 0, EDT), Session.Closed, "Good Friday 2040 (Easter Apr 1)");
     }
 
     // ── holidays 2027–2030 (dates hand-verified against NYSE rules) ──────────────
@@ -304,22 +306,17 @@ contract MarketHoursTest is Test {
         assertSession(et(2026, 9, 7, 23, 59, EDT), Session.Overnight, "Labor Day 23:59 = Tue overnight");
     }
 
-    // ── one-day trading runs ────────────────────────────────────────────────────
-
-    function test_thanksgivingFriday_isOneDayRun() public pure {
-        // Friday Nov 27 2026 trades (half day); its run started Thu 20:00 ET.
+    function test_thanksgivingFriday_tradesAsHalfDay() public pure {
         uint256 fri = et(2026, 11, 27, 12, 0, EST);
-        assertEq(MarketHours.lastOpenAt(fri), et(2026, 11, 26, 20, 0, EST), "reopen Thu 20:00");
         assertEq(lastCloseAt(fri), fri, "open");
         assertSession(et(2026, 11, 26, 21, 0, EST), Session.Overnight, "Thanksgiving 21:00 = Fri overnight");
-        // Following Monday's run reopened Sun Nov 29 20:00 ET.
-        assertEq(MarketHours.lastOpenAt(et(2026, 11, 30, 12, 0, EST)), et(2026, 11, 29, 20, 0, EST), "Mon reopen");
+        assertSession(et(2026, 11, 27, 14, 0, EST), Session.Extended, "13:00 early close");
     }
 
     // ── properties (fuzz) ───────────────────────────────────────────────────────
 
     uint256 constant FUZZ_LO = 1767243600; // 2026-01-01 00:00 EST
-    uint256 constant FUZZ_HI = 1925010000; // 2030-12-31 23:00 EST
+    uint256 constant FUZZ_HI = 1925010000; // 2031-01-01 00:00 EST
 
     function _etSec(uint256 ts) internal pure returns (uint256 sec, uint256 wd) {
         uint256 local = ts - MarketHours.utcOffset(ts);
@@ -361,15 +358,62 @@ contract MarketHoursTest is Test {
         if (wd == DateTimeLib.SUN && sec < 20 hours) assertTrue(sessionAt(ts) == Session.Closed, "Sunday before 20:00");
     }
 
-    /// Derived calendar timestamps always land on 20:00 ET.
-    function testFuzz_closeAndOpenAreAt2000ET(uint256 ts) public pure {
+    /// lastClose always lands on 20:00 ET.
+    function testFuzz_closeIsAt2000ET(uint256 ts) public pure {
         ts = bound(ts, FUZZ_LO, FUZZ_HI);
         (Session s, uint256 lc) = MarketHours.calendar(ts);
-        if (s == Session.Closed) {
-            (uint256 sec,) = _etSec(lc);
-            assertEq(sec, 20 hours, "lastClose at 20:00 ET");
+        if (s != Session.Closed) return;
+        (uint256 sec,) = _etSec(lc);
+        assertEq(sec, 20 hours, "lastClose at 20:00 ET");
+    }
+
+    // ── census: the ONLY closed weekdays are NYSE's, and no others ─────────────
+    // Dates encoded as month*100 + day. Independent of the library: iterates every calendar day.
+
+    function _in(uint256 md, uint16[] memory list) internal pure returns (bool) {
+        for (uint256 i; i < list.length; i++) if (list[i] == md) return true;
+        return false;
+    }
+
+    function _census(uint256 y, uint16[] memory holidays, uint16[] memory halfDays) internal pure {
+        uint256 first = DateTimeLib.dateToEpochDay(y, 1, 1);
+        uint256 last = DateTimeLib.dateToEpochDay(y, 12, 31);
+        uint256 closedWeekdays;
+        for (uint256 day = first; day <= last; day++) {
+            if (DateTimeLib.weekday(day * 1 days) > DateTimeLib.FRI) continue;
+            (, uint256 m, uint256 d) = DateTimeLib.epochDayToDate(day);
+            uint256 md = m * 100 + d;
+            // 16:30 UTC is inside regular hours in both EDT (12:30) and EST (11:30).
+            bool closed = sessionAt(day * 1 days + 16 hours + 30 minutes) == Session.Closed;
+            assertEq(closed, _in(md, holidays), string.concat("holiday census ", vm.toString(md)));
+            if (closed) { closedWeekdays++; continue; }
+            // 18:30 UTC = 14:30 EDT / 13:30 EST: after a 13:00 close, before 16:00.
+            bool half = sessionAt(day * 1 days + 18 hours + 30 minutes) == Session.Extended;
+            assertEq(half, _in(md, halfDays), string.concat("half-day census ", vm.toString(md)));
         }
-        (uint256 osec,) = _etSec(MarketHours.lastOpenAt(ts));
-        assertEq(osec, 20 hours, "lastOpen at 20:00 ET");
+        assertEq(closedWeekdays, holidays.length, "closed-weekday count");
+    }
+
+    function _l(uint16[10] memory a) internal pure returns (uint16[] memory o) { o = new uint16[](10); for (uint256 i; i < 10; i++) o[i] = a[i]; }
+    function _l9(uint16[9] memory a) internal pure returns (uint16[] memory o) { o = new uint16[](9); for (uint256 i; i < 9; i++) o[i] = a[i]; }
+    function _l1(uint16 a) internal pure returns (uint16[] memory o) { o = new uint16[](1); o[0] = a; }
+    function _l2(uint16 a, uint16 b) internal pure returns (uint16[] memory o) { o = new uint16[](2); o[0] = a; o[1] = b; }
+    function _l3(uint16 a, uint16 b, uint16 c) internal pure returns (uint16[] memory o) { o = new uint16[](3); o[0] = a; o[1] = b; o[2] = c; }
+
+    function test_census2026() public pure {
+        _census(2026, _l([uint16(101), 119, 216, 403, 525, 619, 703, 907, 1126, 1225]), _l2(1127, 1224));
+    }
+    function test_census2027() public pure {
+        _census(2027, _l([uint16(101), 118, 215, 326, 531, 618, 705, 906, 1125, 1224]), _l1(1126));
+    }
+    function test_census2028() public pure {
+        // Jan 1 is a Saturday: not observed. Nine closures.
+        _census(2028, _l9([uint16(117), 221, 414, 529, 619, 704, 904, 1123, 1225]), _l2(703, 1124));
+    }
+    function test_census2029() public pure {
+        _census(2029, _l([uint16(101), 115, 219, 330, 528, 619, 704, 903, 1122, 1225]), _l3(703, 1123, 1224));
+    }
+    function test_census2030() public pure {
+        _census(2030, _l([uint16(101), 121, 218, 419, 527, 619, 704, 902, 1128, 1225]), _l3(703, 1129, 1224));
     }
 }

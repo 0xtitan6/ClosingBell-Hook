@@ -96,3 +96,49 @@ or on a multi-day feed outage, never on a quiet Tuesday.
 
 Still `[TBD: tuned]`; this fixes the ordering and the reasoning, not the numbers. The fork test's
 **fee revenue forgone** measurement (`proposal.md` §11) is what settles them.
+
+---
+
+## B4 — No time decay; `refMoved` is derived from feed history, not hook state
+
+**Overrides:** `proposal.md` §5.5 (post-open decay), `architecture.md` §4 `decayedDeviationMult` /
+`lastOpenAt`, and the `lastRefPrice` storage word the r7 §5.4 text implied.
+
+Two findings from the Sept 8 review, one fix.
+
+*Decay was a scheduled discount.* `decayedDeviationMult` returned 1.0 fifteen minutes after the
+reopen whether or not the gap had been absorbed. The pool reprices only when someone trades, so an
+arbitrageur who waited fifteen minutes paid the floor on the whole gap — A7 re-created by the
+calendar. Removed. The gap closing *is* the decay: as arbitrage moves the pool toward the new
+reference, `|dev|` shrinks and `f(|dev|)` falls on its own. `decayWindow`, `decayedDeviationMult`
+and `MarketHours.lastOpenAt` are deleted.
+
+*`refMoved` had no safe producer.* A stored `lastRefPrice` is attacker-refreshable: one dust swap
+after the reference moves resets it, and the next swap sees `refMoved = false` — F1 defeated for
+the cost of one trade. Replaced by a stateless test on feed history: the adapter supplies the
+previous print (`MarketState.prevPrice`, from `getRoundData(roundId − 1)`), and
+
+```
+refMoved := |pool − prevRef| < |pool − ref|
+```
+
+i.e. the pool is still tracking the *old* reference. No swap-path storage, nothing an attacker
+can write, and it turns itself off once the pool has absorbed the move.
+
+## B5 — Deviations are signed; F2 deferred
+
+**Overrides:** `FeeCurve.isRestoring` signature; records the F2 decision `pre-build-review.md` §8
+asked for.
+
+With unsigned deviations a swap from 1% below the reference to 0.5% above read as "restoring"
+(0.5 < 1). `isRestoring` now takes signed deviations and treats any crossing of the reference as
+adverse. `deviationMult` is evaluated on `|postDev|` and saturates at 10,000% so it cannot revert.
+
+F2 (path-additive fee over `[preDev, postDev]`) is **deferred**, not adopted. The endpoint rule
+leaks a bounded share of the surcharge to swap-splitting (§8 worked case: ~12–37%). Stated in the
+README as a known limitation of v1; the fix is ~30 lines of pure `FeeCurve` when there is time.
+
+Also from the review, mechanical: `computeFee` rounds up and clamps to `MAX_LP_FEE` as well as
+`feeCap`; Good Friday is computed (Gregorian computus) rather than tabled; `Session.Closed` is the
+enum's zero value so a zeroed `MarketState` is the fail-safe regime.
+

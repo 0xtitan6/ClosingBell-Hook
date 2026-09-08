@@ -102,7 +102,6 @@ import. Decide this first; everything else follows from it.
 - `sessionAt(uint256 tsUTC) → Session` — UTC→ET with US DST, weekday, session windows, holiday table
 - `calendarOpen(uint256) → bool` — `sessionAt(ts) != Closed`
 - `lastCloseAt(uint256 tsUTC) → uint256` — start of the current dark window, or `tsUTC` if open
-- `lastOpenAt(uint256 tsUTC) → uint256` — most recent session reopen; drives `decayWindow`
 
   Both are pure derivations of the calendar — no state, no feed read. They are what makes B2's
   "calendar time drives ramps" implementable at zero gas cost beyond the lookup.
@@ -125,7 +124,7 @@ Half-days are in scope (the live prior art does not model them; see `prior-art-f
   unrestricted rule exempts the exact trade the hook exists to price (see `pre-build-review.md` §0).
   Deviation the reference created is charged `f(·)`; deviation the pool created keeps the exemption
 - `deviationMult(Params, postDev, bool restoring) → uint256`
-- `decayedDeviationMult(Params, rawMult, lastOpenTs, nowTs) → uint256` — window measured from the
+- (no time decay — build-notes.md B4)
   calendar reopen, not from an observed stale→fresh transition (§5)
 - `computeFee(...) → uint24` — single entry point composing `min(floor × s × d, cap)`
 
