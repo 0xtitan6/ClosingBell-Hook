@@ -89,13 +89,20 @@ library MarketHours {
 
         bool holiday;
         if (m == 1) holiday = day == _observed(y, 1, 1) || day == _nth(y, 1, 3, DateTimeLib.MON); // New Year's, MLK
+
         else if (m == 2) holiday = day == _nth(y, 2, 3, DateTimeLib.MON); // Presidents' Day
+
         else if (m == 3 || m == 4) holiday = day == _goodFriday(y);
         else if (m == 5) holiday = day == _nth(y, 6, 1, DateTimeLib.MON) - 7; // Memorial Day (last Mon of May)
+
         else if (m == 6) holiday = day == _observed(y, 6, 19); // Juneteenth
+
         else if (m == 7) holiday = day == _observed(y, 7, 4); // Independence Day
+
         else if (m == 9) holiday = day == _nth(y, 9, 1, DateTimeLib.MON); // Labor Day
+
         else if (m == 11) holiday = day == _nth(y, 11, 4, DateTimeLib.THU); // Thanksgiving
+
         else if (m == 12) holiday = day == _observed(y, 12, 25); // Christmas
         trading = wd <= DateTimeLib.FRI && !holiday;
 

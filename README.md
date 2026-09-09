@@ -47,7 +47,7 @@ fee = min( floor(session) × stalenessMult(time since session close) × deviatio
 3. **Deviation** between the pool price and the Chainlink reference (both already per-token — no multiplier adjustment; see Edge cases).
 4. **Direction**, evaluated on an *estimated post-swap price*, and split by **who created the gap**. A trade closing deviation the pool itself wandered into pays only the session floor. A trade closing deviation that appeared because the *reference* moved — the reopen arbitrage — pays the full surcharge. This distinction is load-bearing: LVR arbitrage is definitionally price-restoring, so an unrestricted restoring exemption would hand the cheapest fee of the week to the exact trade the hook exists to price. A swap sized to blast through the reference is adverse for the overshoot.
 
-The pool stays open throughout. Uninformed weekend flow fills and pays LPs; only the toxic direction and size gets priced out.
+The pool stays open throughout, and uninformed weekend flow fills and pays LPs. One caveat measured in Round 4: while the reference has moved and nobody has yet arbitraged the pool onto it, *every* trade pays the gap surcharge, not only the toxic direction. That is a consequence of charging on the larger endpoint of the swap (build note B6). Once the gap is closed, restoring flow is back to the session floor.
 
 ### Liveness predicate
 

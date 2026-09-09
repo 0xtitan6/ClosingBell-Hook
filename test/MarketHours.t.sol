@@ -178,13 +178,27 @@ contract MarketHoursTest is Test {
     /// day (~8k weekend, ~12k over a holiday weekend). All are per-swap costs the hook can see.
     function test_gas_calendar_byBranch() public view {
         uint256 g;
-        g = gasleft(); MarketHours.calendar(et(2026, 8, 31, 12, 0, EDT)); assertLt(g - gasleft(), 6_000, "Mon regular");
-        g = gasleft(); MarketHours.calendar(et(2026, 9, 4, 12, 0, EDT));  assertLt(g - gasleft(), 6_000, "Fri regular");
-        g = gasleft(); MarketHours.calendar(et(2026, 9, 4, 2, 0, EDT));   assertLt(g - gasleft(), 6_000, "Fri overnight");
-        g = gasleft(); MarketHours.calendar(et(2026, 3, 20, 12, 0, EDT)); assertLt(g - gasleft(), 8_000, "March (DST rule)");
-        g = gasleft(); MarketHours.calendar(et(2026, 11, 18, 12, 0, EST)); assertLt(g - gasleft(), 9_000, "November (DST rule + Thanksgiving x2)");
-        g = gasleft(); MarketHours.calendar(et(2026, 9, 5, 12, 0, EDT));  assertLt(g - gasleft(), 14_000, "Sat closed");
-        g = gasleft(); MarketHours.calendar(et(2026, 9, 7, 12, 0, EDT));  assertLt(g - gasleft(), 16_000, "Labor Day (3-day walk)");
+        g = gasleft();
+        MarketHours.calendar(et(2026, 8, 31, 12, 0, EDT));
+        assertLt(g - gasleft(), 6_000, "Mon regular");
+        g = gasleft();
+        MarketHours.calendar(et(2026, 9, 4, 12, 0, EDT));
+        assertLt(g - gasleft(), 6_000, "Fri regular");
+        g = gasleft();
+        MarketHours.calendar(et(2026, 9, 4, 2, 0, EDT));
+        assertLt(g - gasleft(), 6_000, "Fri overnight");
+        g = gasleft();
+        MarketHours.calendar(et(2026, 3, 20, 12, 0, EDT));
+        assertLt(g - gasleft(), 8_000, "March (DST rule)");
+        g = gasleft();
+        MarketHours.calendar(et(2026, 11, 18, 12, 0, EST));
+        assertLt(g - gasleft(), 9_000, "November (DST rule + Thanksgiving x2)");
+        g = gasleft();
+        MarketHours.calendar(et(2026, 9, 5, 12, 0, EDT));
+        assertLt(g - gasleft(), 14_000, "Sat closed");
+        g = gasleft();
+        MarketHours.calendar(et(2026, 9, 7, 12, 0, EDT));
+        assertLt(g - gasleft(), 16_000, "Labor Day (3-day walk)");
     }
 
     function test_bellSecond_closeEqualsTs() public pure {
@@ -350,7 +364,9 @@ contract MarketHoursTest is Test {
             assertTrue(sec >= 20 hours || sec < 4 hours, "Overnight in 20:00-04:00");
         } else if (s == Session.Extended) {
             assertTrue(wd <= DateTimeLib.FRI, "Extended on a weekday");
-            assertTrue((sec >= 4 hours && sec < 9 hours + 30 minutes) || (sec >= 13 hours && sec < 20 hours), "Extended window");
+            assertTrue(
+                (sec >= 4 hours && sec < 9 hours + 30 minutes) || (sec >= 13 hours && sec < 20 hours), "Extended window"
+            );
         }
     }
 
@@ -386,7 +402,9 @@ contract MarketHoursTest is Test {
     // Dates encoded as month*100 + day. Independent of the library: iterates every calendar day.
 
     function _in(uint256 md, uint16[] memory list) internal pure returns (bool) {
-        for (uint256 i; i < list.length; i++) if (list[i] == md) return true;
+        for (uint256 i; i < list.length; i++) {
+            if (list[i] == md) return true;
+        }
         return false;
     }
 
@@ -401,7 +419,10 @@ contract MarketHoursTest is Test {
             // 16:30 UTC is inside regular hours in both EDT (12:30) and EST (11:30).
             bool closed = sessionAt(day * 1 days + 16 hours + 30 minutes) == Session.Closed;
             assertEq(closed, _in(md, holidays), string.concat("holiday census ", vm.toString(md)));
-            if (closed) { closedWeekdays++; continue; }
+            if (closed) {
+                closedWeekdays++;
+                continue;
+            }
             // 18:30 UTC = 14:30 EDT / 13:30 EST: after a 13:00 close, before 16:00.
             bool half = sessionAt(day * 1 days + 18 hours + 30 minutes) == Session.Extended;
             assertEq(half, _in(md, halfDays), string.concat("half-day census ", vm.toString(md)));
@@ -409,25 +430,55 @@ contract MarketHoursTest is Test {
         assertEq(closedWeekdays, holidays.length, "closed-weekday count");
     }
 
-    function _l(uint16[10] memory a) internal pure returns (uint16[] memory o) { o = new uint16[](10); for (uint256 i; i < 10; i++) o[i] = a[i]; }
-    function _l9(uint16[9] memory a) internal pure returns (uint16[] memory o) { o = new uint16[](9); for (uint256 i; i < 9; i++) o[i] = a[i]; }
-    function _l1(uint16 a) internal pure returns (uint16[] memory o) { o = new uint16[](1); o[0] = a; }
-    function _l2(uint16 a, uint16 b) internal pure returns (uint16[] memory o) { o = new uint16[](2); o[0] = a; o[1] = b; }
-    function _l3(uint16 a, uint16 b, uint16 c) internal pure returns (uint16[] memory o) { o = new uint16[](3); o[0] = a; o[1] = b; o[2] = c; }
+    function _l(uint16[10] memory a) internal pure returns (uint16[] memory o) {
+        o = new uint16[](10);
+        for (uint256 i; i < 10; i++) {
+            o[i] = a[i];
+        }
+    }
+
+    function _l9(uint16[9] memory a) internal pure returns (uint16[] memory o) {
+        o = new uint16[](9);
+        for (uint256 i; i < 9; i++) {
+            o[i] = a[i];
+        }
+    }
+
+    function _l1(uint16 a) internal pure returns (uint16[] memory o) {
+        o = new uint16[](1);
+        o[0] = a;
+    }
+
+    function _l2(uint16 a, uint16 b) internal pure returns (uint16[] memory o) {
+        o = new uint16[](2);
+        o[0] = a;
+        o[1] = b;
+    }
+
+    function _l3(uint16 a, uint16 b, uint16 c) internal pure returns (uint16[] memory o) {
+        o = new uint16[](3);
+        o[0] = a;
+        o[1] = b;
+        o[2] = c;
+    }
 
     function test_census2026() public pure {
         _census(2026, _l([uint16(101), 119, 216, 403, 525, 619, 703, 907, 1126, 1225]), _l2(1127, 1224));
     }
+
     function test_census2027() public pure {
         _census(2027, _l([uint16(101), 118, 215, 326, 531, 618, 705, 906, 1125, 1224]), _l1(1126));
     }
+
     function test_census2028() public pure {
         // Jan 1 is a Saturday: not observed. Nine closures.
         _census(2028, _l9([uint16(117), 221, 414, 529, 619, 704, 904, 1123, 1225]), _l2(703, 1124));
     }
+
     function test_census2029() public pure {
         _census(2029, _l([uint16(101), 115, 219, 330, 528, 619, 704, 903, 1122, 1225]), _l3(703, 1123, 1224));
     }
+
     function test_census2030() public pure {
         _census(2030, _l([uint16(101), 121, 218, 419, 527, 619, 704, 902, 1128, 1225]), _l3(703, 1129, 1224));
     }

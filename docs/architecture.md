@@ -79,11 +79,13 @@ struct MarketState {
     Session session;
     bool    isLive;        // calendarOpen && fresh && plausible && (quote fresh) && !oraclePaused
     uint256 price;         // stock reference, 1e18; 0 on a failed read
-    uint256 prevPrice;     // last DIFFERENT print the pool could track (B6); 0 = unknown = treated as moved
+    uint256 loPrice;       // lowest print in the feed's recent window (B9); 0 = unknown = treated as moved
+    uint256 hiPrice;       // highest print in that window; lo == hi == price means "no move"
     uint256 updatedAt;     // last authoritative print for the stock feed
     bool    hasQuoteFeed;  // true for non-dollar quote legs (stock/SPY)
     uint256 quotePrice;    // meaningful only when hasQuoteFeed
-    uint256 prevQuotePrice;// same contract as prevPrice, for the quote leg
+    uint256 loQuotePrice;  // the same window for the quote leg
+    uint256 hiQuotePrice;
 }
 ```
 
@@ -142,25 +144,24 @@ both denominated per-token, so no `uiMultiplier()` read and no transient cache a
 
 ### `ChainlinkEquityAdapter.sol`
 - `constructor(stockFeed, quoteFeed, stockToken, maxStaleness, plausibilityBps)` — all immutable;
-  `quoteFeed` and `stockToken` may be zero; rejects `maxStaleness <= 1 days`
-- `getMarketState()` — `view`, stateless, total: every external read behind `try/catch` plus an
-  explicit `code.length` check (a no-code address returns empty data, which `try/catch` cannot
-  catch); any failure → `price = 0`, `isLive = false`
-- internals: `_leg(feed) → (price, prevPrice, updatedAt)`, `_prevAnswer` (round-history walk),
-  `_scale` (feed decimals → 1e18, overflow → 0), `_fresh`, `_plausible`, `_paused`
+  `quoteFeed` and `stockToken` may be zero; rejects `maxStaleness <= 1 days`, `bps > 10_000`,
+  `quoteFeed == stockFeed`, and any address it cannot dry-read at deployment
+- `getMarketState()` — `view`, stateless, total: every read is a raw `staticcall` whose return data
+  is length-checked and hand-decoded, because `try/catch` cannot catch a decoding failure in the
+  caller (build note B10); any failure gives `price = 0`, `isLive = false`
+- internals: `_leg(feed)`, `_window` (round-history walk), `_scale`, `_fresh`, `_plausible`, `_paused`
 
-No storage. The adapter used to be specified with a `lastKnownPrice`; a stateful adapter cannot
-be `view`, and the hook calls it under `staticcall`. The "last known price" is simply the feed's
-latest round, which Chainlink keeps returning after the market closes — a frozen feed is still
-deviated against its last real print. Zero only when the feed itself cannot be read.
+No storage. A stateful adapter cannot be `view`, and the hook calls it under `staticcall`. The
+"last known price" is simply the feed's latest round, which Chainlink keeps returning after the
+market closes — a frozen feed is still deviated against its last real print. Zero only when the
+feed itself cannot be read.
 
-`prevPrice` comes from round history (`getRoundData(latest - i)`, at most `LOOKBACK = 6` rounds):
-skip re-prints of the same answer; if two consecutive rounds are `CLOSURE_GAP = 36h` or more
-apart, the market was closed between them and the print *before* the closure wins even when a
-different print sits in between — so a reopen followed by a retrace (100 → 103 → 102) reports
-`prev = 100`, not 103 (B6). The calendar cannot supply this: `MarketHours.calendar` returns
-`lastClose = now` whenever the market is open, so the closure is read off the feed's own gaps.
-A quiet day's 24h heartbeat gap does not qualify. Unknown history → 0 → the hook charges.
+Instead of a single previous print, the adapter reports the **window**: the lowest and highest
+print over the latest round and up to `LOOKBACK = 6` rounds behind it. The hook treats the pool as
+still following the reference if it lies within the move of any print in that window, which is one
+interval, `[2*lo - ref, 2*hi - ref]`. This is what makes a trend of small prints, a reopen followed
+by a retrace, and a holiday-weekend gap all read as reference moves rather than pool drift
+(B9). Unknown history reports zeros and the hook charges.
 
 **Size `maxStaleness` above the 86400s heartbeat.** It is a dead-feed safety net, not a halt
 detector — anything tight enough to catch a 5–15 minute LULD halt fires on quiet regular sessions

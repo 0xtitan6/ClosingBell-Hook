@@ -24,7 +24,6 @@ contract DeployLocalV4 is BaseScript {
          *
          * Permit2 is always on the same address.
          */
-
         vm.startBroadcast();
         deployArtifacts();
         vm.stopBroadcast();

@@ -14,11 +14,13 @@ contract MockMarketStateAdapter is IMarketStateAdapter {
             session: Session.Regular,
             isLive: true,
             price: 100e18,
-            prevPrice: 100e18,
+            loPrice: 100e18,
+            hiPrice: 100e18,
             updatedAt: block.timestamp,
             hasQuoteFeed: false,
             quotePrice: 0,
-            prevQuotePrice: 0
+            loQuotePrice: 0,
+            hiQuotePrice: 0
         });
     }
 
@@ -45,13 +47,15 @@ contract MockMarketStateAdapter is IMarketStateAdapter {
         state.price = price;
     }
 
-    function setPrevPrice(uint256 p) external {
-        state.prevPrice = p;
+    /// @notice The feed's recent window. (0, 0) = unknown history; lo == hi == price = no move.
+    function setWindow(uint256 lo, uint256 hi) external {
+        state.loPrice = lo;
+        state.hiPrice = hi;
     }
 
-    /// @notice Simulate a reference print: the old price becomes prevPrice.
+    /// @notice Simulate a reference print: the window becomes {old price, new price}.
     function print(uint256 newPrice) external {
-        state.prevPrice = state.price;
+        (state.loPrice, state.hiPrice) = state.price < newPrice ? (state.price, newPrice) : (newPrice, state.price);
         state.price = newPrice;
         state.updatedAt = block.timestamp;
     }
@@ -60,10 +64,11 @@ contract MockMarketStateAdapter is IMarketStateAdapter {
         state.updatedAt = t;
     }
 
-    function setQuote(bool has, uint256 quotePrice, uint256 prevQuotePrice) external {
+    function setQuote(bool has, uint256 quotePrice, uint256 loQuote, uint256 hiQuote) external {
         state.hasQuoteFeed = has;
         state.quotePrice = quotePrice;
-        state.prevQuotePrice = prevQuotePrice;
+        state.loQuotePrice = loQuote;
+        state.hiQuotePrice = hiQuote;
     }
 
     function setReverting(bool r) external {
@@ -74,6 +79,7 @@ contract MockMarketStateAdapter is IMarketStateAdapter {
     function kill() external {
         state.isLive = false;
         state.price = 0;
-        state.prevPrice = 0;
+        state.loPrice = 0;
+        state.hiPrice = 0;
     }
 }

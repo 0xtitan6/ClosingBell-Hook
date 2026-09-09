@@ -230,25 +230,97 @@ LPs. Noted as an MEV-sandwich amplifier, not a standalone profit.
 *Never read by the hook:* `MarketState.session` and `updatedAt`. The session comes from
 `MarketHours`; `updatedAt` is dead by B1. Both stay in the struct for adapters and tooling.
 
-## B8 — Adapter: stateless `prevPrice` from feed gaps
+## B8 — Adapter: stateless reference history (supersedes the closure-gap rule)
 
-**Refines:** B6's adapter contract.
+**Refines:** B6's adapter contract. **Superseded in part by B9.**
 
 B6 asked the adapter for "the last print at or before the close" after a reopen. Two constraints
 shaped how: the adapter must be `view` (the hook reaches it by `staticcall`), so it cannot remember
 anything; and `MarketHours.calendar` returns `lastClose = now` whenever the market is open, so on
 Sunday night there is no calendar signal saying "you just reopened".
 
-The closure is read off the feed instead. Walking back through round history, a gap of
-`CLOSURE_GAP = 36h` between consecutive prints can only be a market closure — the feeds are dark
-~52h on a weekend and ~76h on a holiday weekend, while a quiet trading day is at most the 24h
-heartbeat. The print before that gap is `prevPrice`, even if a different print sits between it and
-the latest (reopen then retrace). Otherwise `prevPrice` is the previous *different* print, with
-heartbeat re-prints skipped. The walk is bounded at `LOOKBACK = 6` rounds; once six distinct
-prints have landed after a reopen the closure scrolls out and the ordinary rule applies, which is
-also when the pool has had ample time to track. Unknown (new feed, phase boundary, reverting
-history) → 0 → the hook charges by default.
+The first implementation derived the closure from the feed: a gap of 36h or more between
+consecutive rounds could only be a market closure, and the print before it became `prevPrice`.
+Round 4 showed that rule is both fragile (a single weekend heartbeat re-print splits the gap into
+two sub-36h halves, and a one-day mid-week holiday never reaches 36h at all) and wrong in the case
+it was built for: once the pool *has* tracked the reopen print, pinning `prevPrice` to the
+pre-closure print makes the retrace read as pool drift. See B9.
 
-Tests were written before the contract (`test/ChainlinkEquityAdapter.t.sol`, 36 cases including
-a totality fuzz over answer, timestamp, decimals and round id); the adapter was built to them.
-Measured `getMarketState` gas, dollar quote, six history reads: ~57k.
+The adapter now reports the **window** instead: the lowest and highest print over the latest round
+and up to `LOOKBACK = 6` rounds behind it. No gap heuristic, no closure detection, no dependence on
+whether the feed heartbeats while closed. Unknown history (new feed, phase boundary, unreadable
+round) reports zeros, and the hook charges by default.
+
+Verified against live Robinhood Chain feeds during this build: the feeds do **not** print while the
+market is closed (GOOGL Fri 10:27 to Mon 20:00, 81.5h; SPY Fri 12:18 to Sun 20:00, 55.7h), and a
+forced print lands at 20:00 on reopen regardless of deviation. Weekday heartbeat prints carry the
+current price rather than repeating the last one, so they are ordinary prints, not re-prints.
+
+## B9 — One reference is not enough: the window rule
+
+**Refines:** B4, B6, B8. **Round 4, three of four reviewers.**
+
+`referenceMoved` asked whether the pool sits within the last move of the last print. That is only
+correct if the pool tracked every print before the current one. Four symptoms, one cause, all
+reachable in an ordinary week with no attacker setup:
+
+- **A trend of small prints.** 100, 100.3, 100.6, 100.9 with the pool still at 100. Each print's
+  band is only 0.3 wide, so by the third print the pool is "outside" it and the arb that takes the
+  whole 0.9% pays the bare floor (500 measured, against 1142 deserved).
+- **A tracked reopen followed by a retrace.** The pool arbs to Sunday's 103 print, paying the
+  surcharge as designed; the feed then retraces to 102, and selling back captures a real move at
+  the floor. Live GOOGL history shows exactly this shape: up 0.31% at the reopen, down 0.52% ten
+  minutes later.
+- **A holiday weekend.** The staleness cap makes tracking Sunday's print unprofitable, and
+  Tuesday's first print then leaves the untracked 3.3% gap priced at 500.
+- **Quote-feed pools.** When one leg printed and the other did not, the previous ratio mixed a
+  fresh leg with a stale one, producing a reference that never existed and misclassifying most
+  prints in both directions.
+
+The fix anchors on the whole window rather than one print. The pool was "following some print p"
+if `|pool - p| <= |ref - p|`. Every such band contains `ref`, so the union over the window is a
+single interval, `[2*lo - ref, 2*hi - ref]` — two comparisons, no loop. For a quote-feed pool the
+hook builds the widest ratio either leg's history could have produced (low stock over high quote,
+high stock over low quote), so a move on one leg is never mistaken for pool drift.
+
+`MarketState` accordingly carries `loPrice`/`hiPrice` and `loQuotePrice`/`hiQuotePrice` in place of
+`prevPrice`/`prevQuotePrice`.
+
+**Residual, accepted:** once `LOOKBACK` distinct prints have landed after a gap, the older print
+scrolls out of the window and a pool that never tracked any of them reads as pool drift. Real feeds
+reach six prints within an hour or two of the open, so this is a bound on how long the protection
+lasts, not a bypass a trader can trigger. Raising `LOOKBACK` to 10 costs about 12k gas.
+
+## B10 — `try/catch` does not make a call safe
+
+**Round 4, two of four reviewers.**
+
+Both the adapter and the hook wrapped their external reads in `try/catch` and documented themselves
+as total. They were not. `try/catch` catches a revert in the callee; decoding the return data
+happens afterwards, in the caller's own frame, and a decode failure there is not caught. A feed
+returning a `uint8` word above 255, a `bool` word of 2, a four-word tuple, short data, or nothing
+at all would revert the adapter — and, through the same hole, the hook.
+
+Both now use a raw `staticcall`, check the return length, and decode by hand into `uint256` words,
+which cannot fail. The hook tolerates an out-of-range `session` word rather than reverting on the
+enum bounds check, since it takes the session from the calendar anyway. Cost: about 8k gas on the
+adapter (57k to 65k) and roughly 2k on the hook. That is the price of the guarantee the whole
+design rests on, and it is paid once per swap.
+
+The adapter's constructor now dry-reads every address it is given, because all five parameters are
+immutable: a feed or token that cannot be read would pin the pool at the closed floor forever with
+no way to fix it. Plausibility also now compares against the last distinct print rather than the
+window low, so a large but legitimate reopen gap no longer holds the feed "not live" for six rounds.
+
+## B11 — Round 4 test coverage
+
+The suite went from 154 to 168 tests. New: an end-to-end file (`test/EndToEnd.t.sol`) that runs the
+real adapter behind the real hook through a real PoolManager across one week — Friday's session, a
+tracked print, post-market, the close, a dark weekend with the staleness ramp, the Sunday reopen
+gapping up, the arbitrage, a retrace, Labor Day, Tuesday's open — asserting the fee at every step
+in the production 6-decimal USDG layout. Also added: the stock-as-token0 orientation (a swapped
+scale factor previously passed the whole suite), the 10x initialization boundary, `_dev` saturation,
+malformed adapter and feed return data, and the quote-leg window.
+
+Measured, production layout, warm: swap through the hook and adapter on the deviation path 111k
+gas; with a dead feed 70k; `getMarketState` alone 65k.

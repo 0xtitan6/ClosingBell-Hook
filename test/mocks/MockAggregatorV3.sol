@@ -95,3 +95,17 @@ contract MockPausableStock {
         return paused;
     }
 }
+
+/// @notice Returns caller-chosen raw bytes for any selector: for proving the adapter survives
+///         malformed return data (which `try/catch` cannot catch).
+contract MockRawReturner {
+    mapping(bytes4 => bytes) internal ret;
+
+    function set(bytes4 sel, bytes memory r) external {
+        ret[sel] = r;
+    }
+
+    fallback(bytes calldata) external returns (bytes memory) {
+        return ret[msg.sig];
+    }
+}

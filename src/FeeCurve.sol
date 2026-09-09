@@ -47,27 +47,34 @@ library FeeCurve {
     }
 
     /// @notice Grows with time since the market closed; 1.0x whenever it is open.
-    function stalenessMult(Params memory p, Session s, uint256 lastClose, uint256 nowTs) internal pure returns (uint256) {
+    function stalenessMult(Params memory p, Session s, uint256 lastClose, uint256 nowTs)
+        internal
+        pure
+        returns (uint256)
+    {
         if (s != Session.Closed || nowTs <= lastClose) return ONE;
         uint256 m = ONE + (nowTs - lastClose) * p.stalenessSlope;
         return m > p.stalenessMax ? p.stalenessMax : m;
     }
 
     /// @notice True when the reference price moved and the pool has not finished following it.
-    ///         The pool "was tracking the old print" if it sits no further from that print than
-    ///         the reference itself moved: |pool - prev| <= |ref - prev|. That covers the whole
-    ///         band between the two prints and its mirror image on the far side of the old print,
-    ///         so a pool nudged a wei past the old print before the close cannot ride the reopen
-    ///         move at the floor. To escape, a trader must pre-pay a real gap larger than the
-    ///         move, in the right direction, before knowing it. Uses feed history only, so there
-    ///         is no stored state to reset. Unknown history (prevRef == 0) counts as moved: when
-    ///         in doubt, charge.
-    function referenceMoved(uint256 poolPrice, uint256 ref, uint256 prevRef) internal pure returns (bool) {
-        if (prevRef == 0) return true;
-        if (prevRef == ref) return false;
-        uint256 move = prevRef < ref ? ref - prevRef : prevRef - ref;
-        uint256 gap = poolPrice < prevRef ? prevRef - poolPrice : poolPrice - prevRef;
-        return gap <= move;
+    ///         The feed supplies the lowest and highest print of its recent window (current print
+    ///         included). The pool "was tracking some print p in that window" if it sits no
+    ///         further from p than the reference itself moved from p: |pool - p| <= |ref - p|.
+    ///         Every such band contains ref, so their union is one interval,
+    ///         [2*lo - ref, 2*hi - ref]. Anchoring on the whole window rather than one previous
+    ///         print means a trend of small prints, a reopen followed by a retrace, or a pool a wei
+    ///         past the old print all still read as "moved". A pool that drifted outside the
+    ///         window's reach on its own is unaffected. Unknown history (lo == 0) counts as moved:
+    ///         when in doubt, charge. lo == hi == ref: the reference has not moved.
+    function referenceMoved(uint256 poolPrice, uint256 ref, uint256 lo, uint256 hi) internal pure returns (bool) {
+        if (lo == 0 || hi == 0) return true;
+        if (lo == hi && lo == ref) return false;
+        uint256 l = lo < ref ? lo : ref;
+        uint256 h = hi > ref ? hi : ref;
+        uint256 lower = 2 * l > ref ? 2 * l - ref : 0;
+        uint256 upper = h > type(uint256).max / 2 ? type(uint256).max : 2 * h - ref;
+        return poolPrice >= lower && poolPrice <= upper;
     }
 
     /// @notice Does this swap deserve the cheap rate? Only if it shrinks a gap the pool itself

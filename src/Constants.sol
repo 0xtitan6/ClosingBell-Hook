@@ -8,8 +8,7 @@ library Constants {
     uint256 internal constant Q96 = 1 << 96; // Uniswap's fixed-point base for sqrtPriceX96
 
     // ── Chainlink round history (adapter) ───────────────────────────────────
-    uint256 internal constant CLOSURE_GAP = 36 hours; // two prints this far apart straddle a market closure (heartbeat is 24h)
-    uint256 internal constant LOOKBACK = 6; // rounds walked back to find the previous different print
+    uint256 internal constant LOOKBACK = 6; // rounds of feed history behind the latest print that form the reference window
 
     // ── NYSE calendar, New York time, as seconds since midnight ─────────────
     uint256 internal constant EDT_OFFSET = 4 hours; // New York behind UTC in daylight time

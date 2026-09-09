@@ -13,7 +13,7 @@ import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 ///                 = f(devKink) + (|dev| - devKink) * devSlope2
 ///
 /// The hook composes them as:
-///   refMoved  = referenceMoved(poolPrice, ref, prevRef)            // stateless, from feed history
+///   refMoved  = referenceMoved(poolPrice, ref, lo, hi)             // stateless, from feed history
 ///   restoring = isRestoring(preDev, postDev, refMoved)             // false whenever refMoved
 ///   devM      = deviationMult(p, |preDev|, |postDev|, restoring)   // charged on the larger endpoint
 ///   fee       = computeFee(p, floorFor(p, s, isLive), stalenessMult(p, s, lastClose, now), devM)
@@ -47,14 +47,30 @@ contract FeeCurveTest is Test {
 
     function test_validate_rejectsEachBrokenInvariant() public view {
         FeeCurve.Params memory q;
-        q = P; q.baseFee = 900;               assertFalse(FeeCurve.validate(q), "base > elevated");
-        q = P; q.elevatedFloor = 3500;        assertFalse(FeeCurve.validate(q), "elevated > closed");
-        q = P; q.closedFloor = 50_000;        assertFalse(FeeCurve.validate(q), "closed > cap");
-        q = P; q.feeCap = 1_000_001;          assertFalse(FeeCurve.validate(q), "cap > MAX_LP_FEE");
-        q = P; q.feeCap = LPFeeLibrary.MAX_LP_FEE; assertFalse(FeeCurve.validate(q), "cap at 100% blocks exact-output swaps in v4");
-        q = P; q.stalenessMax = 5e17;         assertFalse(FeeCurve.validate(q), "stalenessMax < 1");
-        q = P; q.baseFee = 0;                 assertTrue(FeeCurve.validate(q), "zero base is allowed");
-        q = P; q.feeCap = LPFeeLibrary.MAX_LP_FEE - 1; assertTrue(FeeCurve.validate(q), "cap just under 100% is allowed");
+        q = P;
+        q.baseFee = 900;
+        assertFalse(FeeCurve.validate(q), "base > elevated");
+        q = P;
+        q.elevatedFloor = 3500;
+        assertFalse(FeeCurve.validate(q), "elevated > closed");
+        q = P;
+        q.closedFloor = 50_000;
+        assertFalse(FeeCurve.validate(q), "closed > cap");
+        q = P;
+        q.feeCap = 1_000_001;
+        assertFalse(FeeCurve.validate(q), "cap > MAX_LP_FEE");
+        q = P;
+        q.feeCap = LPFeeLibrary.MAX_LP_FEE;
+        assertFalse(FeeCurve.validate(q), "cap at 100% blocks exact-output swaps in v4");
+        q = P;
+        q.stalenessMax = 5e17;
+        assertFalse(FeeCurve.validate(q), "stalenessMax < 1");
+        q = P;
+        q.baseFee = 0;
+        assertTrue(FeeCurve.validate(q), "zero base is allowed");
+        q = P;
+        q.feeCap = LPFeeLibrary.MAX_LP_FEE - 1;
+        assertTrue(FeeCurve.validate(q), "cap just under 100% is allowed");
     }
 
     // ── floorFor ────────────────────────────────────────────────────────────────
@@ -122,79 +138,103 @@ contract FeeCurveTest is Test {
         );
     }
 
-    // ── referenceMoved (stateless F1 producer, B4/B6) ───────────────────────────
+    // ── referenceMoved (stateless F1 producer, B4/B6/B9) ──────────────────────
+    // referenceMoved(pool, ref, lo, hi): lo/hi = the feed's recent window (current print included).
+    // Band = [2*lo - ref, 2*hi - ref]: the union of "within the move of print p" over every p.
 
     function test_referenceMoved_poolBetweenThePrints() public pure {
-        // Reference printed 100 -> 103 at the reopen. Anywhere the pool sits between the two prints,
-        // it has not finished following the move: the gap is reference-created.
-        assertTrue(FeeCurve.referenceMoved(100e18, 103e18, 100e18), "still at the old print");
-        assertTrue(FeeCurve.referenceMoved(1016e17, 103e18, 100e18), "past the midpoint: STILL moved (B6)");
-        assertTrue(FeeCurve.referenceMoved(1029e17, 103e18, 100e18), "almost there: still moved");
-        assertTrue(FeeCurve.referenceMoved(103e18, 103e18, 100e18), "landed exactly on the new print (inclusive)");
-        assertTrue(FeeCurve.referenceMoved(1015e17, 100e18, 103e18), "same band, downward move");
+        // 100 -> 103; pool anywhere from the old print to the new one is still following.
+        assertTrue(FeeCurve.referenceMoved(100e18, 103e18, 100e18, 103e18), "still at the old print");
+        assertTrue(FeeCurve.referenceMoved(1016e17, 103e18, 100e18, 103e18), "past the midpoint: STILL moved (B6)");
+        assertTrue(FeeCurve.referenceMoved(1029e17, 103e18, 100e18, 103e18), "almost there: still moved");
+        assertTrue(
+            FeeCurve.referenceMoved(103e18, 103e18, 100e18, 103e18), "landed exactly on the new print (inclusive)"
+        );
+        assertTrue(FeeCurve.referenceMoved(1015e17, 100e18, 100e18, 103e18), "same band, downward move");
     }
 
     function test_referenceMoved_poolOutsideTheBand_isPoolCreated() public pure {
-        // Pool drifted on its own beyond either print: whatever it does next is its own deviation.
-        assertFalse(FeeCurve.referenceMoved(95e18, 1006e17, 100e18), "below both prints");
-        assertFalse(FeeCurve.referenceMoved(105e18, 1006e17, 100e18), "above both prints");
-        assertFalse(FeeCurve.referenceMoved(104e18, 103e18, 100e18), "overshot the new print");
+        // 100 -> 100.6: band [99.4, 100.6]. A pool at 95 or 105 drifted there on its own.
+        assertFalse(FeeCurve.referenceMoved(95e18, 1006e17, 100e18, 1006e17), "far below both prints");
+        assertFalse(FeeCurve.referenceMoved(105e18, 1006e17, 100e18, 1006e17), "far above both prints");
+        assertFalse(FeeCurve.referenceMoved(104e18, 103e18, 100e18, 103e18), "overshot the new print beyond the band");
     }
 
     function test_referenceMoved_noMove() public pure {
-        assertFalse(FeeCurve.referenceMoved(90e18, 100e18, 100e18), "reference did not move: pool-created gap");
+        assertFalse(FeeCurve.referenceMoved(90e18, 100e18, 100e18, 100e18), "reference did not move: pool-created gap");
     }
 
     function test_referenceMoved_unknownHistoryChargesByDefault() public pure {
-        // L1: no history -> when in doubt, charge. Costs honest restorers one round; never exempts the arb.
-        assertTrue(FeeCurve.referenceMoved(100e18, 103e18, 0));
-        assertTrue(FeeCurve.referenceMoved(100e18, 100e18, 0));
+        assertTrue(FeeCurve.referenceMoved(100e18, 103e18, 0, 0));
+        assertTrue(FeeCurve.referenceMoved(100e18, 100e18, 0, 0));
+        assertTrue(FeeCurve.referenceMoved(100e18, 100e18, 0, 100e18));
+    }
+
+    function test_referenceMoved_pastTheOldPrint_isStillMoved() public pure {
+        // Round 3 H1: a pool nudged a wei below the old print before the close must not read as a
+        // pool-created gap when the reference then gaps up.
+        assertTrue(FeeCurve.referenceMoved(999998e14, 103e18, 100e18, 103e18), "a hair below prev, ref moved up");
+        assertTrue(FeeCurve.referenceMoved(1000002e14, 97e18, 97e18, 100e18), "a hair above prev, ref moved down");
+        assertTrue(FeeCurve.referenceMoved(97e18, 103e18, 100e18, 103e18), "mirror edge: gap == move (inclusive)");
+        assertFalse(
+            FeeCurve.referenceMoved(969999e14, 103e18, 100e18, 103e18), "just past the mirror edge: pool-created"
+        );
+        assertFalse(FeeCurve.referenceMoved(96e18, 103e18, 100e18, 103e18), "escaping needs a pre-paid gap > the move");
+        assertTrue(
+            FeeCurve.referenceMoved(96e18, 104e18, 100e18, 104e18),
+            "guessed the wrong direction: charged on the whole gap"
+        );
+    }
+
+    function test_referenceMoved_trendOfPrints_untrackedPool() public pure {
+        // Round 4 High: 100 -> 100.3 -> 100.6 -> 100.9 with the pool still at 100. Anchoring on the
+        // last print alone (band [100.3, 100.9]) would exempt the arb; the window keeps 100 in reach.
+        assertTrue(FeeCurve.referenceMoved(100e18, 1009e17, 100e18, 1009e17));
+        assertTrue(FeeCurve.referenceMoved(1003e17, 1009e17, 100e18, 1009e17));
+        assertFalse(FeeCurve.referenceMoved(99e18, 1009e17, 100e18, 1009e17), "below the window's reach: pool-created");
+    }
+
+    function test_referenceMoved_trackedReopen_thenRetrace() public pure {
+        // Round 4: 100 (Fri) -> 103 (reopen) -> 102 (retrace). Pool tracked 103. Band [98, 104].
+        assertTrue(
+            FeeCurve.referenceMoved(103e18, 102e18, 100e18, 103e18), "pool at the reopen print: retrace is a move"
+        );
+        assertTrue(FeeCurve.referenceMoved(100e18, 102e18, 100e18, 103e18), "pool never tracked: still a move");
+        assertFalse(FeeCurve.referenceMoved(105e18, 102e18, 100e18, 103e18), "pool drifted past the window on its own");
+        // Full retrace to the pre-close print: ref == lo, band [100, 106]. Pool at 103 -> moved.
+        assertTrue(FeeCurve.referenceMoved(103e18, 100e18, 100e18, 103e18));
     }
 
     function test_referenceMoved_isNotAttackerRefreshable() public pure {
         // A dust swap cannot change feed history, and moving the pool anywhere inside the band
         // keeps refMoved true. There is no position a trader can put the pool in, short of
         // finishing the arbitrage, that earns the exemption.
-        assertTrue(FeeCurve.referenceMoved(1005e17, 103e18, 100e18));
-        assertTrue(FeeCurve.referenceMoved(1025e17, 103e18, 100e18));
+        assertTrue(FeeCurve.referenceMoved(1005e17, 103e18, 100e18, 103e18));
+        assertTrue(FeeCurve.referenceMoved(1025e17, 103e18, 100e18, 103e18));
     }
 
-    function testFuzz_referenceMoved_bandProperties(uint256 pool, uint256 a, uint256 b) public pure {
+    function testFuzz_referenceMoved_bandProperties(uint256 pool, uint256 ref, uint256 lo, uint256 hi) public pure {
         pool = bound(pool, 1, 1e30);
-        a = bound(a, 1, 1e30);
-        b = bound(b, 1, 1e30);
-        // Identical prints never read as a move.
-        assertFalse(FeeCurve.referenceMoved(pool, a, a));
-        if (a == b) return;
-        // Anywhere between the two prints (inclusive) is "moved", whichever print is previous.
-        (uint256 lo, uint256 hi) = a < b ? (a, b) : (b, a);
-        if (pool >= lo && pool <= hi) {
-            assertTrue(FeeCurve.referenceMoved(pool, a, b), "between the prints: moved");
-            assertTrue(FeeCurve.referenceMoved(pool, b, a), "between the prints: moved (either order)");
+        ref = bound(ref, 1, 1e30);
+        lo = bound(lo, 1, 1e30);
+        hi = bound(hi, lo, 1e30);
+        // A window that is just the current print never reads as a move.
+        assertFalse(FeeCurve.referenceMoved(pool, ref, ref, ref));
+        // Anywhere between the window and the current print (inclusive) is "moved".
+        uint256 l = lo < ref ? lo : ref;
+        uint256 h = hi > ref ? hi : ref;
+        if (!(lo == hi && lo == ref) && pool >= l && pool <= h) {
+            assertTrue(FeeCurve.referenceMoved(pool, ref, lo, hi), "between window and ref: moved");
         }
-        // The band is symmetric around the PREVIOUS print, with radius = the size of the move.
-        uint256 move = hi - lo;
-        if (pool <= 2 * b) {
-            uint256 mirror = 2 * b - pool;
-            assertEq(FeeCurve.referenceMoved(pool, a, b), FeeCurve.referenceMoved(mirror, a, b), "mirror around prev");
+        // Exact band: [2l - ref, 2h - ref].
+        bool inBand = pool + ref >= 2 * l && pool + ref <= 2 * h;
+        if (!(lo == hi && lo == ref)) {
+            assertEq(FeeCurve.referenceMoved(pool, ref, lo, hi), inBand, "band formula");
         }
-        // Further from the previous print than the move itself: the gap is the pool's own.
-        if (pool > b + move || (b > move && pool < b - move)) {
-            assertFalse(FeeCurve.referenceMoved(pool, a, b), "outside the radius: pool-created");
+        // Widening the window never turns the flag off.
+        if (FeeCurve.referenceMoved(pool, ref, lo, hi) && lo > 1) {
+            assertTrue(FeeCurve.referenceMoved(pool, ref, lo - 1, hi + 1), "wider window: still moved");
         }
-    }
-
-    function test_referenceMoved_pastTheOldPrint_isStillMoved() public pure {
-        // Round 3 H1: a pool nudged a wei below the old print before the close must not read as a
-        // pool-created gap when the reference then gaps up. The band extends |move| on both sides
-        // of the previous print.
-        assertTrue(FeeCurve.referenceMoved(999998e14, 103e18, 100e18), "a hair below prev, ref moved up");
-        assertTrue(FeeCurve.referenceMoved(1000002e14, 97e18, 100e18), "a hair above prev, ref moved down");
-        assertTrue(FeeCurve.referenceMoved(97e18, 103e18, 100e18), "mirror edge: gap == move (inclusive)");
-        assertFalse(FeeCurve.referenceMoved(969999e14, 103e18, 100e18), "just past the mirror edge: pool-created");
-        // Escaping costs a real pre-paid gap larger than the move, in the right direction.
-        assertFalse(FeeCurve.referenceMoved(96e18, 103e18, 100e18));
-        assertTrue(FeeCurve.referenceMoved(96e18, 104e18, 100e18), "guessed the wrong direction: charged on the whole gap");
     }
 
     // ── isRestoring (F1, signed) ────────────────────────────────────────────────
@@ -264,7 +304,9 @@ contract FeeCurveTest is Test {
     function testFuzz_deviationMult_monotone(uint256 a, uint256 b) public view {
         a = bound(a, 0, 1e18);
         b = bound(b, a, 1e18);
-        assertLe(FeeCurve.deviationMult(P, 0, a, false), FeeCurve.deviationMult(P, 0, b, false), "non-decreasing in |dev|");
+        assertLe(
+            FeeCurve.deviationMult(P, 0, a, false), FeeCurve.deviationMult(P, 0, b, false), "non-decreasing in |dev|"
+        );
     }
 
     function testFuzz_deviationMult_atLeastOne(uint256 dev, bool restoring) public view {
@@ -335,7 +377,13 @@ contract FeeCurveTest is Test {
 
     /// Invariants hold over the whole VALID Params space, not just the fixture.
     function testFuzz_computeFee_invariants_overParams(
-        uint24 base, uint24 elev, uint24 closed, uint24 cap, uint256 s, uint256 d, uint8 which
+        uint24 base,
+        uint24 elev,
+        uint24 closed,
+        uint24 cap,
+        uint256 s,
+        uint256 d,
+        uint8 which
     ) public pure {
         cap = uint24(bound(cap, 1, LPFeeLibrary.MAX_LP_FEE));
         closed = uint24(bound(closed, 0, cap));
@@ -430,7 +478,7 @@ contract FeeCurveTest is Test {
     function test_scenario_sundayNightReopenArb() public view {
         // The trade the hook exists for. Reference wakes at 20:00 ET: prev print 100, new print 103.
         // Pool still at 100 -> gap is REFERENCE-created. Arb swaps toward 103.
-        bool refMoved = FeeCurve.referenceMoved(100e18, 103e18, 100e18);
+        bool refMoved = FeeCurve.referenceMoved(100e18, 103e18, 100e18, 103e18);
         assertTrue(refMoved);
         // Pool is 3% below the new ref (dev = (100-103)/103 ~ -2.91%); arb takes it to ~0.
         int256 pre = -291 * PCT / 100;
@@ -448,7 +496,7 @@ contract FeeCurveTest is Test {
     function test_scenario_reopenArb_noTimeDecay() public view {
         // B4: fifteen minutes (or fifteen hours) later, with the pool still at the old print, the
         // arbitrage is charged exactly the same. There is no clock to wait out.
-        bool refMoved = FeeCurve.referenceMoved(100e18, 103e18, 100e18);
+        bool refMoved = FeeCurve.referenceMoved(100e18, 103e18, 100e18, 103e18);
         int256 pre = -291 * PCT / 100;
         uint256 d = FeeCurve.deviationMult(P, 0, FeeCurve.abs(pre), FeeCurve.isRestoring(pre, 0, refMoved));
         uint24 fee = FeeCurve.computeFee(P, FeeCurve.floorFor(P, Session.Overnight, true), ONE, d);
@@ -463,19 +511,21 @@ contract FeeCurveTest is Test {
         uint256[4] memory pools = [uint256(100e18), 101e18, 102e18, 103e18];
         uint24 last = type(uint24).max;
         for (uint256 i; i < 3; i++) {
-            bool moved = FeeCurve.referenceMoved(pools[i], 103e18, 100e18);
+            bool moved = FeeCurve.referenceMoved(pools[i], 103e18, 100e18, 103e18);
             assertTrue(moved, "inside the band");
             int256 pre = -int256((103e18 - pools[i]) * 1e18 / 103e18);
             int256 post = -int256((103e18 - pools[i + 1]) * 1e18 / 103e18);
             bool restoring = FeeCurve.isRestoring(pre, post, moved);
             assertFalse(restoring);
-            uint24 fee = FeeCurve.computeFee(P, floorFee, ONE, FeeCurve.deviationMult(P, FeeCurve.abs(pre), FeeCurve.abs(post), restoring));
+            uint24 fee = FeeCurve.computeFee(
+                P, floorFee, ONE, FeeCurve.deviationMult(P, FeeCurve.abs(pre), FeeCurve.abs(post), restoring)
+            );
             assertGt(fee, floorFee, "every leg above the floor");
             assertLt(fee, last, "surcharge falls as the gap closes");
             last = fee;
         }
         // After the gap is closed, a pool-created wobble back toward 103 IS restoring and pays the floor.
-        assertFalse(FeeCurve.referenceMoved(1035e17, 103e18, 100e18), "overshoot: pool-created");
+        assertFalse(FeeCurve.referenceMoved(1035e17, 103e18, 100e18, 103e18), "overshoot: pool-created");
         assertTrue(FeeCurve.isRestoring(PCT / 2, 0, false));
     }
 
@@ -485,7 +535,9 @@ contract FeeCurveTest is Test {
         int256 full = -291 * PCT / 100;
         uint24 single = FeeCurve.computeFee(P, floorFee, ONE, FeeCurve.deviationMult(P, FeeCurve.abs(full), 0, false));
         int256 half = full / 2;
-        uint24 leg1 = FeeCurve.computeFee(P, floorFee, ONE, FeeCurve.deviationMult(P, FeeCurve.abs(full), FeeCurve.abs(half), false));
+        uint24 leg1 = FeeCurve.computeFee(
+            P, floorFee, ONE, FeeCurve.deviationMult(P, FeeCurve.abs(full), FeeCurve.abs(half), false)
+        );
         uint24 leg2 = FeeCurve.computeFee(P, floorFee, ONE, FeeCurve.deviationMult(P, FeeCurve.abs(half), 0, false));
         // Each leg is charged on its own larger endpoint; the second leg is not exempt.
         assertEq(leg1, single, "first leg pays the full-gap rate");

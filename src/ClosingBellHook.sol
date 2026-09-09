@@ -54,6 +54,7 @@ contract ClosingBellHook is BaseOverrideFee {
     ) BaseHook(poolManager_) {
         if (!FeeCurve.validate(p)) revert InvalidParams();
         if (!key.fee.isDynamicFee()) revert InvalidParams(); // a static-fee key could never initialize with this hook
+        if (address(adapter_).code.length == 0) revert InvalidParams(); // immutable: an unreadable adapter would be forever
         P = p;
         adapter = adapter_;
         currency0 = key.currency0;
@@ -63,7 +64,7 @@ contract ClosingBellHook is BaseOverrideFee {
         stockIsToken1 = stockIsToken1_;
         uint8 d0 = _decimals(key.currency0);
         uint8 d1 = _decimals(key.currency1);
-        if ((d0 > d1 ? d0 - d1 : d1 - d0) > 18) revert InvalidParams(); // keeps the price math overflow-free
+        if (d0 > 24 || d1 > 24) revert InvalidParams(); // keeps the price math overflow-free at any sqrtPrice
         scale0 = 10 ** d0;
         scale1 = 10 ** d1;
     }
@@ -95,7 +96,7 @@ contract ClosingBellHook is BaseOverrideFee {
                 || Currency.unwrap(key.currency1) != Currency.unwrap(currency1) || key.fee != poolFee
                 || key.tickSpacing != tickSpacing
         ) revert WrongPool();
-        (uint256 ref,) = _references(_market());
+        (uint256 ref,,) = _references(_market());
         if (ref != 0) {
             uint256 pool = _price(sqrtPriceX96);
             if (pool > ref * 10 || pool * 10 < ref) revert PriceMismatch();
@@ -120,45 +121,70 @@ contract ClosingBellHook is BaseOverrideFee {
     function _fee(SwapParams calldata sp) internal view returns (uint24) {
         FeeCurve.Params memory p = P;
         MarketState memory m = _market();
-        (uint256 ref, uint256 prevRef) = _references(m);
         (Session s, uint256 lastClose) = MarketHours.calendar(block.timestamp);
-
-        uint24 floorFee = FeeCurve.floorFor(p, s, m.isLive && ref != 0);
-        uint256 staleM = FeeCurve.stalenessMult(p, s, lastClose, block.timestamp);
-        uint256 devM = ref == 0 ? C.ONE : _deviationMult(p, ref, prevRef, sp);
-        return FeeCurve.computeFee(p, floorFee, staleM, devM);
+        (uint256 ref, uint256 lo, uint256 hi) = _references(m);
+        uint256 devM = ref == 0 ? C.ONE : _deviationMult(p, ref, lo, hi, sp);
+        return FeeCurve.computeFee(
+            p,
+            FeeCurve.floorFor(p, s, m.isLive && ref != 0),
+            FeeCurve.stalenessMult(p, s, lastClose, block.timestamp),
+            devM
+        );
     }
 
-    /// @dev Read the oracle. The adapter promises never to revert; if it does anyway, treat it as
-    ///      a dead feed (zero struct: not live, no price) rather than block the swap.
+    /// @dev Read the oracle with a raw staticcall and decode by hand: `try/catch` cannot catch a
+    ///      decoding failure, and this hook must never block a swap. Anything malformed reads as a
+    ///      dead feed (zero struct: not live, no price). The struct is ten static words.
     function _market() internal view returns (MarketState memory m) {
-        try adapter.getMarketState() returns (MarketState memory s) {
-            m = s;
-        } catch {}
+        (bool ok, bytes memory r) = address(adapter).staticcall(abi.encodeCall(IMarketStateAdapter.getMarketState, ()));
+        if (!ok || r.length != 320) return m;
+        uint256[10] memory w = abi.decode(r, (uint256[10]));
+        m.session = w[0] <= uint256(type(Session).max) ? Session(w[0]) : Session.Closed;
+        m.isLive = w[1] != 0;
+        m.price = w[2];
+        m.loPrice = w[3];
+        m.hiPrice = w[4];
+        m.updatedAt = w[5];
+        m.hasQuoteFeed = w[6] != 0;
+        m.quotePrice = w[7];
+        m.loQuotePrice = w[8];
+        m.hiQuotePrice = w[9];
     }
 
     /// @dev How far the pool is from the reference, and whether this swap helps or hurts.
-    function _deviationMult(FeeCurve.Params memory p, uint256 ref, uint256 prevRef, SwapParams calldata sp)
+    function _deviationMult(FeeCurve.Params memory p, uint256 ref, uint256 lo, uint256 hi, SwapParams calldata sp)
         internal
         view
         returns (uint256)
     {
         (uint256 pre, uint256 post) = _poolPrices(sp);
 
-        bool refMoved = FeeCurve.referenceMoved(pre, ref, prevRef);
+        bool refMoved = FeeCurve.referenceMoved(pre, ref, lo, hi);
         int256 preDev = _dev(pre, ref);
         int256 postDev = _dev(post, ref);
         bool restoring = FeeCurve.isRestoring(preDev, postDev, refMoved);
         return FeeCurve.deviationMult(p, FeeCurve.abs(preDev), FeeCurve.abs(postDev), restoring);
     }
 
-    /// @dev Current and previous reference price, as quote-per-stock. 0 means "not usable".
-    function _references(MarketState memory m) internal pure returns (uint256 ref, uint256 prevRef) {
-        if (m.price == 0) return (0, 0);
-        if (!m.hasQuoteFeed) return (m.price, m.prevPrice);
-        if (m.quotePrice == 0) return (0, 0);
-        ref = FullMath.mulDiv(m.price, C.ONE, m.quotePrice);
-        prevRef = (m.prevPrice == 0 || m.prevQuotePrice == 0) ? 0 : FullMath.mulDiv(m.prevPrice, C.ONE, m.prevQuotePrice);
+    /// @dev The reference price and the low/high of its recent window, as quote-per-stock. ref 0
+    ///      means "not usable". For a quote-feed pool the window is the widest ratio either leg's
+    ///      history could have produced (low stock over high quote, high stock over low quote), so
+    ///      a move on one leg while the other is stale is never mistaken for pool drift.
+    function _references(MarketState memory m) internal pure returns (uint256 ref, uint256 lo, uint256 hi) {
+        if (m.price == 0) return (0, 0, 0);
+        if (!m.hasQuoteFeed) return (m.price, m.loPrice, m.hiPrice);
+        if (m.quotePrice == 0) return (0, 0, 0);
+        ref = _ratio(m.price, m.quotePrice);
+        if (ref == 0) return (0, 0, 0);
+        if (m.loPrice == 0 || m.loQuotePrice == 0) return (ref, 0, 0);
+        lo = _ratio(m.loPrice, m.hiQuotePrice);
+        hi = _ratio(m.hiPrice, m.loQuotePrice);
+    }
+
+    /// @dev a * 1e18 / b, or 0 if it cannot be represented. Never reverts.
+    function _ratio(uint256 a, uint256 b) internal pure returns (uint256) {
+        if (b == 0 || a / b >= type(uint256).max / C.ONE) return 0;
+        return FullMath.mulDiv(a, C.ONE, b);
     }
 
     /// @dev The pool's price now, and where this swap would leave it.

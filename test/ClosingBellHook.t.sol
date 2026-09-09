@@ -22,6 +22,7 @@ import {Vm} from "forge-std/Vm.sol";
 import {EasyPosm} from "./utils/libraries/EasyPosm.sol";
 import {BaseTest} from "./utils/BaseTest.sol";
 import {MockMarketStateAdapter} from "./mocks/MockMarketStateAdapter.sol";
+import {MockRawReturner} from "./mocks/MockAggregatorV3.sol";
 
 import {ClosingBellHook} from "../src/ClosingBellHook.sol";
 import {FeeCurve} from "../src/FeeCurve.sol";
@@ -73,9 +74,7 @@ contract ClosingBellHookTest is BaseTest {
         poolKey = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(flags));
         poolId = poolKey.toId();
 
-        deployCodeTo(
-            "ClosingBellHook.sol:ClosingBellHook", abi.encode(poolManager, adapter, P, poolKey, true), flags
-        );
+        deployCodeTo("ClosingBellHook.sol:ClosingBellHook", abi.encode(poolManager, adapter, P, poolKey, true), flags);
         hook = ClosingBellHook(flags);
 
         // Regular hours, Fri Sep 4 2026 12:00 ET, before the pool exists.
@@ -89,7 +88,9 @@ contract ClosingBellHookTest is BaseTest {
         (uint256 a0, uint256 a1) = LiquidityAmounts.getAmountsForLiquidity(
             SQRT_PRICE_100, TickMath.getSqrtPriceAtTick(tl), TickMath.getSqrtPriceAtTick(tu), liq
         );
-        positionManager.mint(poolKey, tl, tu, liq, a0 + 1, a1 + 1, address(this), block.timestamp, V4Constants.ZERO_BYTES);
+        positionManager.mint(
+            poolKey, tl, tu, liq, a0 + 1, a1 + 1, address(this), block.timestamp, V4Constants.ZERO_BYTES
+        );
     }
 
     // ── helpers ─────────────────────────────────────────────────────────────────
@@ -135,9 +136,8 @@ contract ClosingBellHookTest is BaseTest {
         assertTrue(p.afterInitialize && p.beforeSwap, "afterInitialize + beforeSwap");
         assertFalse(
             p.beforeInitialize || p.beforeAddLiquidity || p.afterAddLiquidity || p.beforeRemoveLiquidity
-                || p.afterRemoveLiquidity || p.afterSwap || p.beforeDonate || p.afterDonate
-                || p.beforeSwapReturnDelta || p.afterSwapReturnDelta || p.afterAddLiquidityReturnDelta
-                || p.afterRemoveLiquidityReturnDelta,
+                || p.afterRemoveLiquidity || p.afterSwap || p.beforeDonate || p.afterDonate || p.beforeSwapReturnDelta
+                || p.afterSwapReturnDelta || p.afterAddLiquidityReturnDelta || p.afterRemoveLiquidityReturnDelta,
             "nothing else"
         );
     }
@@ -226,9 +226,9 @@ contract ClosingBellHookTest is BaseTest {
         // The arb buys stock toward 103. Moving toward the reference - but the reference moved.
         uint24 arb = quote(true, 1_400e18);
         assertGt(arb, 800, "F1: reopen arbitrage is charged, not floored");
-        // Control: same pool, same trade, but the feed says the reference did NOT move (prev == ref).
+        // Control: same pool, same trade, but the feed says the reference did NOT move (window == ref).
         // Then the gap is the pool's own and buying toward 103 is restoring: floor.
-        adapter.setPrevPrice(103e18);
+        adapter.setWindow(103e18, 103e18);
         assertEq(quote(true, 100e18), 800, "control: pool-created gap, restoring toward ref, pays floor");
     }
 
@@ -258,8 +258,8 @@ contract ClosingBellHookTest is BaseTest {
         swap(true, 1_000e18);
         assertEq(quote(false, 2e18), 500, "known history: restoring pays base");
         // Without history the hook cannot tell it from a reference move: charged.
-        adapter.setPrevPrice(0);
-        assertGt(quote(false, 2e18), 500, "prevPrice == 0: when in doubt, charge");
+        adapter.setWindow(0, 0);
+        assertGt(quote(false, 2e18), 500, "unknown window: when in doubt, charge");
     }
 
     function test_calendarWins_overFeedSession() public {
@@ -326,7 +326,7 @@ contract ClosingBellHookTest is BaseTest {
         adapter.setPrice(0);
         assertEq(quote(true, 5_000e18), 3000, "live but price 0: closed floor, no cheap deviation-free rate");
         adapter.setPrice(100e18);
-        adapter.setQuote(true, 0, 0);
+        adapter.setQuote(true, 0, 0, 0);
         assertEq(quote(true, 5_000e18), 3000, "quote feed at 0: same");
     }
 
@@ -348,16 +348,105 @@ contract ClosingBellHookTest is BaseTest {
 
     function test_quoteFeedPool_referenceIsStockOverQuote() public {
         // Stock/SPY-style pool: reference = stockPrice / quotePrice.
-        adapter.setQuote(true, 1e18, 1e18); // quote worth $1: ref 100, pool at 100
+        adapter.setQuote(true, 1e18, 1e18, 1e18); // quote worth $1: ref 100, pool at 100
         assertEq(quote(true, 1e15), 500);
-        adapter.setQuote(true, 2e18, 2e18); // quote worth $2: ref 50, pool at 100 is +100%
+        adapter.setQuote(true, 2e18, 2e18, 2e18); // quote worth $2: ref 50, pool at 100 is +100%
         assertEq(quote(true, 1e15), P.feeCap, "adverse buy on a 100% gap: capped");
         // Unknown quote history counts as a reference move: a restoring sell is charged.
-        adapter.setQuote(true, 1e18, 1e18);
+        adapter.setQuote(true, 1e18, 1e18, 1e18);
         swap(true, 1_000e18);
         assertEq(quote(false, 2e18), 500, "known history: restoring");
-        adapter.setQuote(true, 1e18, 0);
-        assertGt(quote(false, 2e18), 500, "prevQuotePrice == 0: charged");
+        adapter.setQuote(true, 1e18, 0, 0);
+        assertGt(quote(false, 2e18), 500, "unknown quote window: charged");
+    }
+
+    function test_quoteFeedPool_oneLegMoved_isNotPoolDrift() public {
+        // R4: stock printed 100 -> 100.5 while the quote leg sat at 1.0; then the quote prints
+        // 1.0 -> 1.005 so ref is back at 100. The pool tracked 100.5. Selling toward 100 captures
+        // the quote move: must be charged, not read as restoring a pool-created gap.
+        adapter.setQuote(true, 1e18, 1e18, 1e18);
+        adapter.setPrice(1005e17);
+        adapter.setWindow(100e18, 1005e17);
+        swap(true, 250e18); // pool ~100.5
+        adapter.setQuote(true, 1005e15, 1e18, 1005e15);
+        assertGt(quote(false, 2e18), 500, "quote-leg move captured: charged");
+        // Mirror: quote printed earlier (0.995 -> 1.0), stock now prints 100 -> 100.5; pool at 100.
+        adapter.setWindow(100e18, 1005e17);
+        adapter.setQuote(true, 1e18, 995e15, 1e18);
+        assertGt(quote(true, 100e18), 500, "stock-leg move with a quote print in the window: charged");
+    }
+
+    function test_trendOfPrints_untrackedPool_stillCharged() public {
+        // R4 High: prints 100 -> 100.3 -> 100.6 -> 100.9 while the pool sat at 100. A single
+        // previous-print anchor would call the pool "outside the last move" and exempt the arb.
+        adapter.setPrice(1009e17);
+        adapter.setWindow(100e18, 1009e17);
+        assertGt(quote(true, 400e18), 500, "arb to 100.9 charged");
+        // Control: the window says the reference never moved -> pool-created -> restoring pays base.
+        adapter.setWindow(1009e17, 1009e17);
+        assertEq(quote(true, 100e18), 500);
+    }
+
+    function test_trackedReopen_thenRetrace_stillCharged() public {
+        // R4: Sunday reopen 100 -> 103, the pool tracks it, the feed retraces to 102. Selling from
+        // 103 to 102 captures the retrace: charged, not floored.
+        vm.warp(et(2026, 9, 13, 21, 0));
+        adapter.print(103e18);
+        swap(true, 1_400e18); // pool ~103
+        adapter.setPrice(102e18);
+        adapter.setWindow(100e18, 103e18);
+        assertGt(quote(false, 4e18), 800, "retrace after a tracked reopen: charged");
+        // and the full retrace back to 100
+        adapter.setPrice(100e18);
+        assertGt(quote(false, 14e18), 800, "retrace to the pre-close print: charged");
+    }
+
+    function test_malformedAdapter_readsAsDeadFeed_neverBlocks() public {
+        // R4: try/catch cannot catch a decoding failure; the hook decodes by hand instead.
+        MockRawReturner raw = new MockRawReturner();
+        address flags = address(uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG) ^ (0x6666 << 144));
+        PoolKey memory k = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(flags));
+        deployCodeTo("ClosingBellHook.sol:ClosingBellHook", abi.encode(poolManager, raw, P, k, true), flags);
+        ClosingBellHook h = ClosingBellHook(flags);
+        poolManager.initialize(k, SQRT_PRICE_100); // raw returns empty bytes: dead feed, check skipped
+        SwapParams memory sp =
+            SwapParams({zeroForOne: true, amountSpecified: -1e15, sqrtPriceLimitX96: TickMath.MIN_SQRT_PRICE + 1});
+        assertEq(h.quoteFee(sp), 3000, "empty return data: closed floor");
+        raw.set(IMarketStateAdapter.getMarketState.selector, abi.encode(uint256(1)));
+        assertEq(h.quoteFee(sp), 3000, "one word: closed floor");
+        raw.set(
+            IMarketStateAdapter.getMarketState.selector,
+            abi.encode(
+                uint256(7),
+                uint256(1),
+                uint256(100e18),
+                uint256(100e18),
+                uint256(100e18),
+                block.timestamp,
+                uint256(0),
+                uint256(0),
+                uint256(0),
+                uint256(0)
+            )
+        );
+        assertEq(h.quoteFee(sp), 500, "session 7 is tolerated (calendar decides), live price: base");
+        raw.set(
+            IMarketStateAdapter.getMarketState.selector,
+            abi.encode(
+                uint256(1),
+                uint256(1),
+                uint256(100e18),
+                uint256(100e18),
+                uint256(100e18),
+                block.timestamp,
+                uint256(0),
+                uint256(0),
+                uint256(0),
+                uint256(0),
+                uint256(0)
+            )
+        );
+        assertEq(h.quoteFee(sp), 3000, "eleven words: dead feed");
     }
 
     function test_exactOutput_isPricedLikeExactInput() public {
@@ -399,6 +488,8 @@ contract ClosingBellHookTest is BaseTest {
         assertGt(h.price(TickMath.MIN_SQRT_PRICE), 1e40, "buy-side limit: pool price is astronomically high");
         assertLt(h.price(TickMath.MAX_SQRT_PRICE), 1, "sell-side limit: pool price is ~0");
         assertEq(h.price(0), type(uint256).max, "sqrtP 0 saturates rather than dividing by zero");
+        assertEq(h.dev(type(uint256).max, 1), int256(1e20), "_dev saturates at MAX_DEV instead of overflowing");
+        assertEq(h.dev(50e18, 100e18), -int256(5e17), "-50%");
         // Fee is monotone in size all the way to the limit.
         assertGe(quote(true, 1e40), quote(true, 50_000e18), "sweeping the pool never costs less than half of it");
     }
@@ -412,6 +503,10 @@ contract HookHarness is ClosingBellHook {
 
     function price(uint160 sqrtP) external view returns (uint256) {
         return _price(sqrtP);
+    }
+
+    function dev(uint256 pool, uint256 ref) external pure returns (int256) {
+        return _dev(pool, ref);
     }
 }
 
@@ -451,7 +546,13 @@ contract ClosingBellHookDecimalsTest is BaseTest {
             devSlope1: 100,
             devSlope2: 200
         });
-        poolKey = PoolKey(Currency.wrap(address(usdg)), Currency.wrap(address(aapl)), LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(address(0)));
+        poolKey = PoolKey(
+            Currency.wrap(address(usdg)),
+            Currency.wrap(address(aapl)),
+            LPFeeLibrary.DYNAMIC_FEE_FLAG,
+            60,
+            IHooks(address(0))
+        );
     }
 
     function deployTokenWithDecimals(uint8 dec) internal returns (MockERC20 token) {
@@ -480,7 +581,9 @@ contract ClosingBellHookDecimalsTest is BaseTest {
         (uint256 a0, uint256 a1) = LiquidityAmounts.getAmountsForLiquidity(
             SQRT_INIT, TickMath.getSqrtPriceAtTick(tl), TickMath.getSqrtPriceAtTick(tu), liq
         );
-        positionManager.mint(poolKey, tl, tu, liq, a0 + 1, a1 + 1, address(this), block.timestamp, V4Constants.ZERO_BYTES);
+        positionManager.mint(
+            poolKey, tl, tu, liq, a0 + 1, a1 + 1, address(this), block.timestamp, V4Constants.ZERO_BYTES
+        );
     }
 
     function quote(bool buyStock, uint256 amountIn) internal view returns (uint24) {
@@ -509,5 +612,53 @@ contract ClosingBellHookDecimalsTest is BaseTest {
         deployHook(false, 0x5555);
         vm.expectRevert();
         poolManager.initialize(poolKey, SQRT_INIT);
+    }
+
+    function test_initSanityCheck_isTenX() public {
+        // 9.5x the reference is accepted, 10.5x is refused. sqrt = 1e6/sqrt(P) x Q96 for this layout.
+        deployHook(true, 0x7777);
+        vm.expectRevert();
+        poolManager.initialize(poolKey, uint160(uint256(30860) << 96)); // ~1050 USDG per AAPL
+        poolManager.initialize(poolKey, uint160(uint256(32444) << 96)); // ~950: accepted
+    }
+
+    function test_stockAsToken0_feesMatch() public {
+        // Reverse ordering: AAPL (18) as token0, USDG (6) as token1. Redeploy USDG until it sorts after.
+        do {
+            usdg = deployTokenWithDecimals(6);
+        } while (address(usdg) < address(aapl));
+        poolKey = PoolKey(
+            Currency.wrap(address(aapl)),
+            Currency.wrap(address(usdg)),
+            LPFeeLibrary.DYNAMIC_FEE_FLAG,
+            60,
+            IHooks(address(0))
+        );
+        hook = ClosingBellHook(deployHook(false, 0x8888));
+        // 100 USDG per AAPL: token1/token0 in wei = 100e6 / 1e18 = 1e-10, sqrt = 1e-5.
+        uint160 sqrtInit = uint160((uint256(1) << 96) / 1e5);
+        vm.warp(DateTimeLib.dateTimeToTimestamp(2026, 9, 4, 12, 0, 0) + EDT);
+        poolManager.initialize(poolKey, sqrtInit);
+        int24 tl = TickMath.minUsableTick(60);
+        int24 tu = TickMath.maxUsableTick(60);
+        (uint256 a0, uint256 a1) = LiquidityAmounts.getAmountsForLiquidity(
+            sqrtInit, TickMath.getSqrtPriceAtTick(tl), TickMath.getSqrtPriceAtTick(tu), 1e16
+        );
+        positionManager.mint(
+            poolKey, tl, tu, 1e16, a0 + 1, a1 + 1, address(this), block.timestamp, V4Constants.ZERO_BYTES
+        );
+        // Buying stock is now oneForZero (spend USDG = token1).
+        SwapParams memory buy = SwapParams({
+            zeroForOne: false,
+            amountSpecified: -int256(5_000e6),
+            sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
+        });
+        SwapParams memory tiny = SwapParams({
+            zeroForOne: false,
+            amountSpecified: -int256(1e3),
+            sqrtPriceLimitX96: TickMath.MAX_SQRT_PRICE - 1
+        });
+        assertEq(hook.quoteFee(tiny), 500, "quiet tiny buy");
+        assertEq(hook.quoteFee(buy), 10500, "5000 USDG buy: same 10.25% post-gap, stock as token0");
     }
 }
