@@ -3,10 +3,9 @@ pragma solidity ^0.8.28;
 
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
-import {Session, MarketState, IMarketStateAdapter} from "./IMarketStateAdapter.sol";
+import {MarketState, IMarketStateAdapter} from "./IMarketStateAdapter.sol";
 import {AggregatorV3Interface, IOraclePausable} from "./AggregatorV3Interface.sol";
 import {Constants as C} from "./Constants.sol";
-import {MarketHours} from "./MarketHours.sol";
 
 /// @notice v1 oracle for ClosingBell: Chainlink Data Feeds plus the NYSE calendar.
 ///
@@ -59,12 +58,12 @@ contract ChainlinkEquityAdapter is IMarketStateAdapter {
 
     /// @inheritdoc IMarketStateAdapter
     function getMarketState() external view returns (MarketState memory m) {
-        (m.session,) = MarketHours.calendar(block.timestamp);
         m.hasQuoteFeed = address(quoteFeed) != address(0);
 
         uint256 last;
-        (m.price, m.loPrice, m.hiPrice, last, m.updatedAt) = _leg(stockFeed);
-        bool live = m.price != 0 && _fresh(m.updatedAt) && _plausible(m.price, last) && !_paused();
+        uint256 updatedAt;
+        (m.price, m.loPrice, m.hiPrice, last, updatedAt) = _leg(stockFeed);
+        bool live = m.price != 0 && _fresh(updatedAt) && _plausible(m.price, last) && !_paused();
 
         if (m.hasQuoteFeed) {
             uint256 quoteAt;

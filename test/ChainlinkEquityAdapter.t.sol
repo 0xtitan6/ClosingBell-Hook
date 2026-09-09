@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {DateTimeLib} from "solady/utils/DateTimeLib.sol";
 
-import {IMarketStateAdapter, MarketState, Session} from "../src/IMarketStateAdapter.sol";
+import {IMarketStateAdapter, MarketState} from "../src/IMarketStateAdapter.sol";
 import {AggregatorV3Interface, IOraclePausable} from "../src/AggregatorV3Interface.sol";
 import {ChainlinkEquityAdapter} from "../src/ChainlinkEquityAdapter.sol";
 import {MockAggregatorV3, MockPausableStock, MockRawReturner} from "./mocks/MockAggregatorV3.sol";
@@ -18,9 +18,7 @@ import {MockAggregatorV3, MockPausableStock, MockRawReturner} from "./mocks/Mock
 ///
 /// getMarketState() — total, view, never reverts. Every read is a raw staticcall, length-checked and
 /// hand-decoded, because try/catch cannot catch a decoding failure in the caller:
-///   session     = MarketHours.calendar(block.timestamp) (hook ignores it; tooling reads it)
 ///   price       = latest answer scaled to 1e18; 0 if unreadable, <= 0, decimals unreadable/>77, or overflow
-///   updatedAt   = latest round's updatedAt; 0 on failure
 ///   loPrice/hiPrice = min/max over the latest print and up to LOOKBACK (6) rounds behind it,
 ///                 skipping non-positive answers, stopping at the first unreadable round;
 ///                 both 0 if no history round could be read (unknown -> the hook charges)
@@ -153,24 +151,13 @@ contract ChainlinkEquityAdapterTest is Test {
     function test_regularHours_freshFeed_isLive() public view {
         MarketState memory m = state();
         assertTrue(m.isLive, "live");
-        assertEq(uint8(m.session), uint8(Session.Regular), "session from the calendar");
         assertEq(m.price, 100e18, "8 decimals scaled to 1e18");
         assertEq(m.loPrice, 995e17, "window low");
         assertEq(m.hiPrice, 100e18, "window high");
-        assertEq(m.updatedAt, et(2026, 9, 4, 11, 0), "latest round's updatedAt");
         assertFalse(m.hasQuoteFeed);
         assertEq(m.quotePrice, 0);
         assertEq(m.loQuotePrice, 0);
         assertEq(m.hiQuotePrice, 0);
-    }
-
-    function test_sessionField_followsTheCalendar() public {
-        vm.warp(et(2026, 9, 5, 12, 0)); // Saturday
-        assertEq(uint8(state().session), uint8(Session.Closed));
-        vm.warp(et(2026, 9, 3, 22, 0)); // Thursday 22:00 = Friday's overnight
-        assertEq(uint8(state().session), uint8(Session.Overnight));
-        vm.warp(et(2026, 9, 4, 17, 0)); // Friday post-market
-        assertEq(uint8(state().session), uint8(Session.Extended));
     }
 
     // ── decimals ────────────────────────────────────────────────────────────
@@ -293,9 +280,7 @@ contract ChainlinkEquityAdapterTest is Test {
     function test_weekend_feedDark_stillLiveUntilMaxStaleness() public {
         stock.push(100_50000000, et(2026, 9, 4, 19, 0));
         vm.warp(et(2026, 9, 5, 12, 0));
-        MarketState memory m = state();
-        assertTrue(m.isLive);
-        assertEq(uint8(m.session), uint8(Session.Closed));
+        assertTrue(state().isLive, "a dark weekend is not a dead feed");
     }
 
     // ── liveness: plausibility ──────────────────────────────────────────────
@@ -373,7 +358,6 @@ contract ChainlinkEquityAdapterTest is Test {
         assertFalse(m.isLive);
         assertEq(m.price, 0);
         assertEq(m.loPrice, 0);
-        assertEq(m.updatedAt, 0);
     }
 
     function test_feedCodeRemoved_returnsDeadState() public {
@@ -526,7 +510,7 @@ contract ChainlinkEquityAdapterTest is Test {
         uint256 used = g - gasleft();
         emit log_named_uint("getMarketState gas (dollar quote)", used);
         // Seven cold reads, hand-decoded. Raw staticcall + manual decode costs ~8k over try/catch;
-        // that is the price of the adapter never reverting on malformed return data (R4 M-1).
-        assertLt(used, 70_000);
+        // that is the price of the adapter never reverting on malformed return data (B10).
+        assertLt(used, 63_000);
     }
 }

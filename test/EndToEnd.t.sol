@@ -247,13 +247,13 @@ contract EndToEndTest is BaseTest {
         swap(true, 100e6);
         uint256 deviationPath = g - gasleft();
         emit log_named_uint("router swap gas (live feed)", deviationPath);
-        assertLt(deviationPath, 140_000);
+        assertLt(deviationPath, 110_000);
 
         feed.setRevertLatest(true);
         g = gasleft();
         swap(true, 100e6);
         uint256 deadPath = g - gasleft();
         emit log_named_uint("router swap gas (dead feed)", deadPath);
-        assertLt(deadPath, 110_000);
+        assertLt(deadPath, 68_000);
     }
 }

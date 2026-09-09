@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IMarketStateAdapter, MarketState, Session} from "../../src/IMarketStateAdapter.sol";
+import {IMarketStateAdapter, MarketState} from "../../src/IMarketStateAdapter.sol";
 
 /// @notice Canned oracle for hook tests. Set any MarketState, then swap.
 contract MockMarketStateAdapter is IMarketStateAdapter {
@@ -9,14 +9,12 @@ contract MockMarketStateAdapter is IMarketStateAdapter {
     bool public reverting; // simulate a broken adapter (violates the interface contract)
 
     constructor() {
-        // Sensible default: Regular hours, live, $100 reference, fresh print, dollar quote.
+        // Sensible default: live, $100 reference, no move in the window, dollar quote.
         state = MarketState({
-            session: Session.Regular,
             isLive: true,
             price: 100e18,
             loPrice: 100e18,
             hiPrice: 100e18,
-            updatedAt: block.timestamp,
             hasQuoteFeed: false,
             quotePrice: 0,
             loQuotePrice: 0,
@@ -33,10 +31,6 @@ contract MockMarketStateAdapter is IMarketStateAdapter {
 
     function set(MarketState memory s) external {
         state = s;
-    }
-
-    function setSession(Session s) external {
-        state.session = s;
     }
 
     function setLive(bool live) external {
@@ -57,11 +51,6 @@ contract MockMarketStateAdapter is IMarketStateAdapter {
     function print(uint256 newPrice) external {
         (state.loPrice, state.hiPrice) = state.price < newPrice ? (state.price, newPrice) : (newPrice, state.price);
         state.price = newPrice;
-        state.updatedAt = block.timestamp;
-    }
-
-    function setUpdatedAt(uint256 t) external {
-        state.updatedAt = t;
     }
 
     function setQuote(bool has, uint256 quotePrice, uint256 loQuote, uint256 hiQuote) external {

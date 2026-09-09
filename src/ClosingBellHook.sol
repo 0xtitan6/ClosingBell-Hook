@@ -5,7 +5,7 @@ import {BaseOverrideFee} from "@openzeppelin/uniswap-hooks/src/fee/BaseOverrideF
 import {BaseHook} from "@openzeppelin/uniswap-hooks/src/base/BaseHook.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
-import {PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
+import {PoolId, PoolIdLibrary} from "@uniswap/v4-core/src/types/PoolId.sol";
 import {SwapParams} from "@uniswap/v4-core/src/types/PoolOperation.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
@@ -35,10 +35,7 @@ contract ClosingBellHook is BaseOverrideFee {
     error PriceMismatch(); // pool initialized more than 10x away from the reference: wrong side or wrong decimals
 
     IMarketStateAdapter public immutable adapter;
-    Currency public immutable currency0;
-    Currency public immutable currency1;
-    uint24 public immutable poolFee;
-    int24 public immutable tickSpacing;
+    PoolId public immutable poolId; // the one pool this hook serves; the key's hash, fixed at construction
     bool public immutable stockIsToken1; // true for every AAPL/USDG pool: USDG's address sorts lower
     uint256 internal immutable scale0; // 10^decimals of each token, to read the pool price in human units
     uint256 internal immutable scale1;
@@ -57,10 +54,7 @@ contract ClosingBellHook is BaseOverrideFee {
         if (address(adapter_).code.length == 0) revert InvalidParams(); // immutable: an unreadable adapter would be forever
         P = p;
         adapter = adapter_;
-        currency0 = key.currency0;
-        currency1 = key.currency1;
-        poolFee = key.fee;
-        tickSpacing = key.tickSpacing;
+        poolId = key.toId();
         stockIsToken1 = stockIsToken1_;
         uint8 d0 = _decimals(key.currency0);
         uint8 d1 = _decimals(key.currency1);
@@ -91,11 +85,7 @@ contract ClosingBellHook is BaseOverrideFee {
         returns (bytes4)
     {
         bytes4 sel = super._afterInitialize(sender, key, sqrtPriceX96, tick);
-        if (
-            Currency.unwrap(key.currency0) != Currency.unwrap(currency0)
-                || Currency.unwrap(key.currency1) != Currency.unwrap(currency1) || key.fee != poolFee
-                || key.tickSpacing != tickSpacing
-        ) revert WrongPool();
+        if (PoolId.unwrap(key.toId()) != PoolId.unwrap(poolId)) revert WrongPool();
         (uint256 ref,,) = _references(_market());
         if (ref != 0) {
             uint256 pool = _price(sqrtPriceX96);
@@ -137,18 +127,16 @@ contract ClosingBellHook is BaseOverrideFee {
     ///      dead feed (zero struct: not live, no price). The struct is ten static words.
     function _market() internal view returns (MarketState memory m) {
         (bool ok, bytes memory r) = address(adapter).staticcall(abi.encodeCall(IMarketStateAdapter.getMarketState, ()));
-        if (!ok || r.length != 320) return m;
-        uint256[10] memory w = abi.decode(r, (uint256[10]));
-        m.session = w[0] <= uint256(type(Session).max) ? Session(w[0]) : Session.Closed;
-        m.isLive = w[1] != 0;
-        m.price = w[2];
-        m.loPrice = w[3];
-        m.hiPrice = w[4];
-        m.updatedAt = w[5];
-        m.hasQuoteFeed = w[6] != 0;
-        m.quotePrice = w[7];
-        m.loQuotePrice = w[8];
-        m.hiQuotePrice = w[9];
+        if (!ok || r.length != 256) return m;
+        uint256[8] memory w = abi.decode(r, (uint256[8]));
+        m.isLive = w[0] != 0;
+        m.price = w[1];
+        m.loPrice = w[2];
+        m.hiPrice = w[3];
+        m.hasQuoteFeed = w[4] != 0;
+        m.quotePrice = w[5];
+        m.loQuotePrice = w[6];
+        m.hiQuotePrice = w[7];
     }
 
     /// @dev How far the pool is from the reference, and whether this swap helps or hurts.
@@ -189,9 +177,8 @@ contract ClosingBellHook is BaseOverrideFee {
 
     /// @dev The pool's price now, and where this swap would leave it.
     function _poolPrices(SwapParams calldata sp) internal view returns (uint256 pre, uint256 post) {
-        PoolKey memory key = PoolKey(currency0, currency1, poolFee, tickSpacing, this);
-        (uint160 sqrtP,,,) = poolManager.getSlot0(key.toId());
-        uint128 liquidity = poolManager.getLiquidity(key.toId());
+        (uint160 sqrtP,,,) = poolManager.getSlot0(poolId);
+        uint128 liquidity = poolManager.getLiquidity(poolId);
         pre = _price(sqrtP);
         post = _price(_estimatePostSqrtPrice(sqrtP, liquidity, sp));
     }

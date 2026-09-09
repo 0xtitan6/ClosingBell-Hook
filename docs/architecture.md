@@ -23,8 +23,8 @@ Post-freeze corrections are in `build-notes.md` (B1–B3) and are already folded
         .getMarketState()                 + getLiquidity                   (zeroForOne,
                     │                          (this pool)                  amountSpecified)
                     │                                │                                │
-        session, isLive, price,            pool price (pre)                           │
-        updatedAt, quotePrice                        │                                │
+        isLive, price, lo/hi,              pool price (pre)                           │
+        quotePrice + its lo/hi                       │                                │
                     │                                └──────────┬─────────────────────┘
                     │                                           ▼
                     │                              estimated post-swap price
@@ -76,14 +76,12 @@ never learns how it was produced:
 enum Session { Closed, Regular, Extended, Overnight }   // Closed = 0: zeroed state is fail-safe
 
 struct MarketState {
-    Session session;
-    bool    isLive;        // calendarOpen && fresh && plausible && (quote fresh) && !oraclePaused
-    uint256 price;         // stock reference, 1e18; 0 on a failed read
+    bool    isLive;        // calendarOpen is NOT part of this: fresh && plausible && !paused && (quote fresh)
+    uint256 price;         // the stock's reference, 1e18; 0 if the feed could not be read
     uint256 loPrice;       // lowest print in the feed's recent window (B9); 0 = unknown = treated as moved
     uint256 hiPrice;       // highest print in that window; lo == hi == price means "no move"
-    uint256 updatedAt;     // last authoritative print for the stock feed
-    bool    hasQuoteFeed;  // true for non-dollar quote legs (stock/SPY)
-    uint256 quotePrice;    // meaningful only when hasQuoteFeed
+    bool    hasQuoteFeed;  // true when the pool's other token is not a dollar (stock/SPY)
+    uint256 quotePrice;    // that token's reference, 1e18
     uint256 loQuotePrice;  // the same window for the quote leg
     uint256 hiQuotePrice;
 }
@@ -146,6 +144,9 @@ both denominated per-token, so no `uiMultiplier()` read and no transient cache a
 - `constructor(stockFeed, quoteFeed, stockToken, maxStaleness, plausibilityBps)` — all immutable;
   `quoteFeed` and `stockToken` may be zero; rejects `maxStaleness <= 1 days`, `bps > 10_000`,
   `quoteFeed == stockFeed`, and any address it cannot dry-read at deployment
+No session field: the session comes from `MarketHours`, which the hook calls itself. The oracle
+seam carries prices only (B12).
+
 - `getMarketState()` — `view`, stateless, total: every read is a raw `staticcall` whose return data
   is length-checked and hand-decoded, because `try/catch` cannot catch a decoding failure in the
   caller (build note B10); any failure gives `price = 0`, `isLive = false`

@@ -26,7 +26,7 @@ import {MockRawReturner} from "./mocks/MockAggregatorV3.sol";
 
 import {ClosingBellHook} from "../src/ClosingBellHook.sol";
 import {FeeCurve} from "../src/FeeCurve.sol";
-import {IMarketStateAdapter, Session} from "../src/IMarketStateAdapter.sol";
+import {IMarketStateAdapter} from "../src/IMarketStateAdapter.sol";
 
 /// Integration spec for the hook, driven through a real PoolManager. Expects:
 ///   constructor(IPoolManager, IMarketStateAdapter, FeeCurve.Params, PoolKey, bool stockIsToken1)
@@ -221,7 +221,6 @@ contract ClosingBellHookTest is BaseTest {
     function test_reopenArb_isCharged_notExempt() public {
         // Sunday 21:00 ET (Overnight). Reference wakes: 100 -> 103. Pool still at 100.
         vm.warp(et(2026, 9, 13, 21, 0));
-        adapter.setSession(Session.Overnight);
         adapter.print(103e18); // prev 100, ref 103
         // The arb buys stock toward 103. Moving toward the reference - but the reference moved.
         uint24 arb = quote(true, 1_400e18);
@@ -234,7 +233,6 @@ contract ClosingBellHookTest is BaseTest {
 
     function test_reopenArb_splitDoesNotEscape() public {
         vm.warp(et(2026, 9, 13, 21, 0));
-        adapter.setSession(Session.Overnight);
         adapter.print(103e18);
         uint24 leg1 = quote(true, 700e18);
         swap(true, 700e18); // execute the first leg: pool moves ~1.4% toward 103
@@ -262,10 +260,10 @@ contract ClosingBellHookTest is BaseTest {
         assertGt(quote(false, 2e18), 500, "unknown window: when in doubt, charge");
     }
 
-    function test_calendarWins_overFeedSession() public {
-        // The hook takes the session from the NYSE calendar, never from the feed.
-        adapter.setSession(Session.Closed);
-        assertEq(quote(true, 1e15), 500, "Friday noon is Regular whatever the feed says");
+    function test_sessionComesFromTheCalendarOnly() public view {
+        // The oracle has no say in the session: MarketState carries no session field, and the hook
+        // reads MarketHours directly. Friday noon is Regular whatever the feed reports.
+        assertEq(quote(true, 1e15), 500);
     }
 
     // ── the fee actually reaches the swap ───────────────────────────────────────
@@ -414,31 +412,28 @@ contract ClosingBellHookTest is BaseTest {
         assertEq(h.quoteFee(sp), 3000, "empty return data: closed floor");
         raw.set(IMarketStateAdapter.getMarketState.selector, abi.encode(uint256(1)));
         assertEq(h.quoteFee(sp), 3000, "one word: closed floor");
+        // A non-boolean isLive word decodes as true rather than reverting on the bool check.
         raw.set(
             IMarketStateAdapter.getMarketState.selector,
             abi.encode(
-                uint256(7),
-                uint256(1),
+                uint256(2),
                 uint256(100e18),
                 uint256(100e18),
                 uint256(100e18),
-                block.timestamp,
                 uint256(0),
                 uint256(0),
                 uint256(0),
                 uint256(0)
             )
         );
-        assertEq(h.quoteFee(sp), 500, "session 7 is tolerated (calendar decides), live price: base");
+        assertEq(h.quoteFee(sp), 500, "eight well-formed words, live price: base fee");
         raw.set(
             IMarketStateAdapter.getMarketState.selector,
             abi.encode(
                 uint256(1),
-                uint256(1),
                 uint256(100e18),
                 uint256(100e18),
                 uint256(100e18),
-                block.timestamp,
                 uint256(0),
                 uint256(0),
                 uint256(0),
@@ -446,7 +441,7 @@ contract ClosingBellHookTest is BaseTest {
                 uint256(0)
             )
         );
-        assertEq(h.quoteFee(sp), 3000, "eleven words: dead feed");
+        assertEq(h.quoteFee(sp), 3000, "nine words: dead feed");
     }
 
     function test_exactOutput_isPricedLikeExactInput() public {

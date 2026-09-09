@@ -324,3 +324,33 @@ malformed adapter and feed return data, and the quote-leg window.
 
 Measured, production layout, warm: swap through the hook and adapter on the deviation path 111k
 gas; with a dead feed 70k; `getMarketState` alone 65k.
+
+## B12 — Cut the fields the hook never reads
+
+`MarketState` carried `session` and `updatedAt`. The hook decoded both and used neither: the
+session comes from `MarketHours.calendar`, which the hook calls itself, and `updatedAt` is dead by
+B1 (it cannot detect a halt on these feeds). Filling `session` meant the adapter ran the whole NYSE
+calendar on every swap — 3-4k gas in regular hours, 8-12k on a closed day — to produce a value the
+hook threw away, and the calendar then ran a second time inside the hook.
+
+Both fields are gone. The adapter no longer imports `MarketHours` at all; the oracle seam now
+carries only prices, and the calendar is the hook's business alone. `MarketState` is eight words
+instead of ten.
+
+The hook's four pool-key immutables (`currency0`, `currency1`, `poolFee`, `tickSpacing`) collapsed
+into one `poolId`, computed once in the constructor. `_afterInitialize` compares one hash instead
+of four fields, and is stricter for it — the id covers the hooks address too. `_poolPrices` reads
+the immutable directly instead of rebuilding a `PoolKey` and hashing it on every swap.
+
+Measured, production layout, warm:
+
+| | before | after |
+|---|---|---|
+| swap, live feed | 111,397 | 105,926 |
+| swap, dead feed | 70,316 | 65,216 |
+| `getMarketState` | 65,668 | 61,079 |
+
+**Note for the Streams upgrade:** a Data Streams adapter carries an explicit `marketStatus`, and
+the proposal's plan was for it to arrive through this struct. It would reintroduce a session field
+then. Paying 3-12k gas per swap now, on every trade, to hold a slot open for a v2 that does not
+exist is the wrong trade; the interface change is a one-line struct edit when that day comes.
