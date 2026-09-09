@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
 import {FeeCurve} from "../src/FeeCurve.sol";
-import {Session} from "../src/IMarketStateAdapter.sol";
+import {Session} from "../src/MarketHours.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 
 /// Executable spec for FeeCurve. Units: fees in pips (1e-6); multipliers in 1e18; deviations are
@@ -162,6 +162,26 @@ contract FeeCurveTest is Test {
 
     function test_referenceMoved_noMove() public pure {
         assertFalse(FeeCurve.referenceMoved(90e18, 100e18, 100e18, 100e18), "reference did not move: pool-created gap");
+    }
+
+    function test_referenceMoved_hugeWindowSaturates_neverReverts() public pure {
+        // R5 F1: `2 * lo` was unguarded while `2 * hi` was guarded, so a feed answer above
+        // uint256.max/2 panicked on the swap path and bricked the pool. The band arithmetic must
+        // stay exact and never overflow, however absurd the reference.
+        uint256 half = type(uint256).max / 2 + 1;
+        // Window [half, half+1], ref half+1: band is [half-1, half+1].
+        assertTrue(FeeCurve.referenceMoved(half, half + 1, half, half + 1), "inside the band");
+        assertTrue(FeeCurve.referenceMoved(half - 1, half + 1, half, half + 1), "on the lower edge");
+        assertFalse(FeeCurve.referenceMoved(1e20, half + 1, half, half + 1), "far below: pool-created");
+        // A window wide enough that the upper bound cannot be represented saturates upward, which
+        // charges rather than exempts.
+        assertTrue(FeeCurve.referenceMoved(type(uint256).max, 1, 1, type(uint256).max), "upper saturates to charge");
+    }
+
+    function test_referenceMoved_backwardsWindowChargesByDefault() public pure {
+        // A conforming adapter never reports lo > hi, but the seam is meant to be swappable and a
+        // backwards window would otherwise read as "no move" and hand out the exemption.
+        assertTrue(FeeCurve.referenceMoved(120e18, 150e18, 200e18, 100e18), "lo > hi: charge");
     }
 
     function test_referenceMoved_unknownHistoryChargesByDefault() public pure {

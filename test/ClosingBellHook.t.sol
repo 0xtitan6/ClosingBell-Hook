@@ -3,6 +3,8 @@ pragma solidity ^0.8.28;
 
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
+import {CustomRevert} from "@uniswap/v4-core/src/libraries/CustomRevert.sol";
+import {BaseOverrideFee} from "@openzeppelin/uniswap-hooks/src/fee/BaseOverrideFee.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
@@ -129,6 +131,20 @@ contract ClosingBellHookTest is BaseTest {
         return 1e36 / raw;
     }
 
+    /// Expect `initialize` to fail because the hook's afterInitialize reverted with `inner`.
+    /// v4 wraps hook reverts (ERC-7751), so a bare expectRevert would pass on any failure at all.
+    function expectInitRevert(address hookAddr, bytes4 inner) internal {
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                hookAddr,
+                IHooks.afterInitialize.selector,
+                abi.encodeWithSelector(inner),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+    }
+
     // ── wiring ──────────────────────────────────────────────────────────────────
 
     function test_permissions() public view {
@@ -147,16 +163,44 @@ contract ClosingBellHookTest is BaseTest {
     }
 
     function test_rejectsStaticFeePool() public {
+        // Rejected by BaseOverrideFee before the pool check: a static fee cannot be overridden.
         PoolKey memory bad = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
-        vm.expectRevert();
+        expectInitRevert(address(hook), BaseOverrideFee.NotDynamicFee.selector);
         poolManager.initialize(bad, SQRT_PRICE_100);
     }
 
     function test_rejectsAnyOtherPool() public {
         // Same tokens, different tick spacing: not the pool this hook was configured for.
         PoolKey memory other = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 10, IHooks(address(hook)));
-        vm.expectRevert();
+        expectInitRevert(address(hook), ClosingBellHook.WrongPool.selector);
         poolManager.initialize(other, SQRT_PRICE_100);
+        // And a different token pair, which the pre-R5 four-field check also covered.
+        (Currency other0, Currency other1) = deployCurrencyPair();
+        PoolKey memory wrongPair = PoolKey(other0, other1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(address(hook)));
+        expectInitRevert(address(hook), ClosingBellHook.WrongPool.selector);
+        poolManager.initialize(wrongPair, SQRT_PRICE_100);
+    }
+
+    function test_constructorPinsHooksField_soAMistypedKeyStillWorks() public {
+        // R5: poolId hashes the whole key, `hooks` included. A deploy script that mines the address
+        // but leaves `hooks` wrong in the key used to produce a hook no pool could ever initialize.
+        // The constructor overwrites that field with address(this), so the id is always the real one.
+        address flags = address(uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG) ^ (0x9999 << 144));
+        PoolKey memory mistyped = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(address(0)));
+        deployCodeTo("ClosingBellHook.sol:ClosingBellHook", abi.encode(poolManager, adapter, P, mistyped, true), flags);
+        ClosingBellHook h = ClosingBellHook(flags);
+        PoolKey memory real = PoolKey(currency0, currency1, LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(flags));
+        assertEq(PoolId.unwrap(h.poolId()), PoolId.unwrap(real.toId()), "id is the real pool's, not the mistyped key's");
+        poolManager.initialize(real, SQRT_PRICE_100); // would revert WrongPool without the fix
+    }
+
+    function test_hugeReferenceSaturates_poolStaysOpen() public {
+        // R5 F1 end to end: a decodable but absurd feed answer must not brick the pool.
+        uint256 half = type(uint256).max / 2 + 1;
+        adapter.setPrice(half + 1);
+        adapter.setWindow(half, half + 1);
+        assertEq(quote(true, 1e15), P.feeCap, "huge reference: capped, not reverted");
+        swap(true, 1e15);
     }
 
     // ── the four regimes ────────────────────────────────────────────────────────
@@ -615,6 +659,22 @@ contract ClosingBellHookDecimalsTest is BaseTest {
         vm.expectRevert();
         poolManager.initialize(poolKey, uint160(uint256(30860) << 96)); // ~1050 USDG per AAPL
         poolManager.initialize(poolKey, uint160(uint256(32444) << 96)); // ~950: accepted
+    }
+
+    function test_constructorRejectsWideDecimalGap() public {
+        // R5 F2: with a gap of 21 or more, _price overflows at v4's own MIN_SQRT_PRICE, which the
+        // post-swap estimate reaches whenever an exact-output swap asks for more than the pool
+        // holds. That would turn a legal, partially-fillable v4 swap into a revert.
+        MockERC20 zeroDec = deployTokenWithDecimals(0);
+        MockERC20 bigDec = deployTokenWithDecimals(21);
+        (address a0, address a1) = address(zeroDec) < address(bigDec)
+            ? (address(zeroDec), address(bigDec))
+            : (address(bigDec), address(zeroDec));
+        PoolKey memory wide =
+            PoolKey(Currency.wrap(a0), Currency.wrap(a1), LPFeeLibrary.DYNAMIC_FEE_FLAG, 60, IHooks(address(0)));
+        address flags = address(uint160(Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_SWAP_FLAG) ^ (0xAAAA << 144));
+        vm.expectRevert();
+        deployCodeTo("ClosingBellHook.sol:ClosingBellHook", abi.encode(poolManager, adapter, P, wide, true), flags);
     }
 
     function test_stockAsToken0_feesMatch() public {

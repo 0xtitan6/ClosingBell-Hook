@@ -1,52 +1,46 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Session} from "./IMarketStateAdapter.sol";
+import {Session} from "./MarketHours.sol";
 import {Constants as C} from "./Constants.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 
-/// @notice The fee formula. Pure math, no state.
-///
-///   fee = min( floor × stalenessMult × deviationMult, feeCap )
-///
-/// Units: fees in pips (1e-6, so 500 = 5 bps). Multipliers in 1e18 (1e18 = 1.0x).
-/// Deviation is (pool − ref) / ref, signed, in 1e18 (−1e16 = pool 1% below the reference).
+/// @notice What a swap costs: a floor for the time of day, raised the longer the market has been
+///         shut, raised again the further the pool has drifted from the real price, then capped.
+/// @dev Fees in pips (500 = 5 basis points). Multipliers and drift use 1e18 for 1.0.
 library FeeCurve {
     uint256 private constant ONE = C.ONE;
 
-    /// @notice What a pool creator sets once, in the hook's constructor.
-    /// The hook must enforce: baseFee <= elevatedFloor <= closedFloor <= feeCap < MAX_LP_FEE,
-    /// and stalenessMax >= 1e18. The cap is strictly below 100%: v4 rejects exact-output swaps
-    /// at a 100% fee, so a saturated fee would block them.
+    /// @notice Chosen by whoever launches the pool. Fixed forever once deployed.
     struct Params {
-        uint24 baseFee; // regular hours, feed live
-        uint24 elevatedFloor; // pre/post-market and overnight
-        uint24 closedFloor; // weekends, holidays, or a dead feed
-        uint24 feeCap; // hard ceiling on the final fee
-        uint64 stalenessSlope; // how fast the fee climbs per second the market has been closed
-        uint64 stalenessMax; // ceiling on that climb (1e18 units)
-        uint64 devKink; // deviation where the surcharge steepens (1e18 units)
-        uint64 devSlope1; // surcharge per unit of deviation, below the kink
-        uint64 devSlope2; // surcharge per unit of deviation, above the kink
+        uint24 baseFee; // the cheapest rate: market open, price feed working
+        uint24 elevatedFloor; // pre-market, after-hours and overnight
+        uint24 closedFloor; // weekends, holidays, or when the price feed is unusable
+        uint24 feeCap; // the most this pool will ever charge
+        uint64 stalenessSlope; // how fast the fee climbs for each second the market stays shut
+        uint64 stalenessMax; // and how high that climb is allowed to go
+        uint64 devKink; // the drift beyond which the surcharge gets steeper
+        uint64 devSlope1; // how hard drift is charged below that point
+        uint64 devSlope2; // and above it
     }
 
-    /// @notice Are these parameters sane? The hook's constructor requires this to be true.
-    ///         Floors must be ordered, the cap must be a legal v4 fee, and the staleness ceiling
-    ///         must not make a closed market cheaper than an open one.
+    /// @notice Each floor must be at least the one before it, and the cap must stay under 100%,
+    ///         because Uniswap rejects some swaps at a 100% fee.
     function validate(Params memory p) internal pure returns (bool) {
         return p.baseFee <= p.elevatedFloor && p.elevatedFloor <= p.closedFloor && p.closedFloor <= p.feeCap
             && p.feeCap < LPFeeLibrary.MAX_LP_FEE && p.stalenessMax >= ONE;
     }
 
-    /// @notice Minimum fee for the current market state. A dead feed always gets the closed floor.
+    /// @notice The least this swap can cost. A broken feed gets the closed-market rate.
     function floorFor(Params memory p, Session s, bool isLive) internal pure returns (uint24) {
         if (!isLive || s == Session.Closed) return p.closedFloor;
         if (s == Session.Regular) return p.baseFee;
         return p.elevatedFloor;
     }
 
-    /// @notice Grows with time since the market closed; 1.0x whenever it is open.
+    /// @notice Climbs the longer the market has been shut. The longer nobody has seen a real
+    ///         price, the more the stock could have moved. 1.0x while open.
     function stalenessMult(Params memory p, Session s, uint256 lastClose, uint256 nowTs)
         internal
         pure
@@ -57,29 +51,28 @@ library FeeCurve {
         return m > p.stalenessMax ? p.stalenessMax : m;
     }
 
-    /// @notice True when the reference price moved and the pool has not finished following it.
-    ///         The feed supplies the lowest and highest print of its recent window (current print
-    ///         included). The pool "was tracking some print p in that window" if it sits no
-    ///         further from p than the reference itself moved from p: |pool - p| <= |ref - p|.
-    ///         Every such band contains ref, so their union is one interval,
-    ///         [2*lo - ref, 2*hi - ref]. Anchoring on the whole window rather than one previous
-    ///         print means a trend of small prints, a reopen followed by a retrace, or a pool a wei
-    ///         past the old print all still read as "moved". A pool that drifted outside the
-    ///         window's reach on its own is unaffected. Unknown history (lo == 0) counts as moved:
-    ///         when in doubt, charge. lo == hi == ref: the reference has not moved.
+    /// @notice Whose fault is the gap: did the stock move, or did the pool drift?
+    ///         If the pool sits near any price the feed published recently, it was following the
+    ///         stock and got left behind, so closing that gap is arbitrage and pays full price.
+    ///         Using the whole recent range, not just the last price, stops someone waiting out a
+    ///         run of small moves and then taking the lot cheaply (B9). No history means charge.
+    /// @dev The pool tracked some p in [lo, hi] if |pool - p| <= |ref - p|. Every such band
+    ///      contains ref, so the union is one interval, [2lo - ref, 2hi - ref].
     function referenceMoved(uint256 poolPrice, uint256 ref, uint256 lo, uint256 hi) internal pure returns (bool) {
-        if (lo == 0 || hi == 0) return true;
+        if (lo == 0 || hi == 0 || lo > hi) return true;
         if (lo == hi && lo == ref) return false;
-        uint256 l = lo < ref ? lo : ref;
-        uint256 h = hi > ref ? hi : ref;
-        uint256 lower = 2 * l > ref ? 2 * l - ref : 0;
-        uint256 upper = h > type(uint256).max / 2 ? type(uint256).max : 2 * h - ref;
+        uint256 l = lo < ref ? lo : ref; // l <= ref
+        uint256 h = hi > ref ? hi : ref; // h >= ref
+        // Written the long way so an absurd price cannot overflow. A failure here stops every swap.
+        uint256 down = ref - l;
+        uint256 up = h - ref;
+        uint256 lower = down >= l ? 0 : l - down;
+        uint256 upper = up > type(uint256).max - h ? type(uint256).max : h + up;
         return poolPrice >= lower && poolPrice <= upper;
     }
 
-    /// @notice Does this swap deserve the cheap rate? Only if it shrinks a gap the pool itself
-    ///         drifted into, without crossing the reference. If the gap exists because the
-    ///         reference moved, closing it is arbitrage and pays full price.
+    /// @notice Earns the cheap rate only by narrowing a gap the pool made itself, without
+    ///         overshooting past the real price into a new gap.
     function isRestoring(int256 preDev, int256 postDev, bool refMoved) internal pure returns (bool) {
         if (refMoved) return false;
         if (postDev == 0) return preDev != 0;
@@ -87,11 +80,9 @@ library FeeCurve {
         return abs(postDev) < abs(preDev);
     }
 
-    /// @notice 1.0x for restoring swaps. Otherwise rises with the larger of the deviation the swap
-    ///         started from and the one it leaves behind — so an arbitrage that lands exactly on
-    ///         the reference is charged for the whole gap it took, not for the zero it ends at.
-    ///         One slope up to the kink, a steeper one beyond it. Capped at MAX_DEV so it can never
-    ///         overflow and block a swap.
+    /// @notice How much the drift multiplies the fee. Helpful swaps pay nothing extra. The rest
+    ///         pay on the wider of the gap before and after, so landing exactly on the real price
+    ///         still pays for the gap it took (B6). Steeper past `devKink`.
     function deviationMult(Params memory p, uint256 absPreDev, uint256 absPostDev, bool restoring)
         internal
         pure
@@ -105,10 +96,8 @@ library FeeCurve {
         return ONE + uint256(p.devKink) * p.devSlope1 + (dev - p.devKink) * p.devSlope2;
     }
 
-    /// @notice Multiply it all together, round to the nearest pip, and cap. Also clamps just under
-    ///         the protocol maximum so a misconfigured feeCap cannot make the PoolManager reject
-    ///         exact-output swaps. Nearest, not up: a real pool is never at the reference to the wei, and a
-    ///         1e-12 deviation must not turn "exactly the base fee" into base + 1.
+    /// @notice Multiplies it all together and applies the cap.
+    /// @dev Rounds to nearest, not up: a rounding speck should not turn the base fee into base + 1.
     function computeFee(Params memory p, uint24 floorFee, uint256 stalenessM, uint256 deviationM)
         internal
         pure
@@ -121,7 +110,7 @@ library FeeCurve {
         return fee > cap ? uint24(cap) : uint24(fee);
     }
 
-    /// @dev Saturating: abs(type(int256).min) would overflow, and a revert here blocks a swap.
+    /// @dev Size ignoring sign. The one impossible case is pinned, not failed: a failure blocks swaps.
     function abs(int256 x) internal pure returns (uint256) {
         if (x == type(int256).min) return uint256(type(int256).max);
         return x < 0 ? uint256(-x) : uint256(x);

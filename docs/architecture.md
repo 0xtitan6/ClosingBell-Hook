@@ -55,8 +55,8 @@ a swap — see the adapter totality contract in §4.
 |---|---|---|
 | `ClosingBellHook.sol` | hook contract | Orchestration only: gather inputs, call `FeeCurve`, return the override |
 | `FeeCurve.sol` | pure library | All fee math: floors, staleness, reference-moved test, signed deviation, cap |
-| `MarketHours.sol` | pure library | Timestamp → `Session`. Calendar only |
-| `IMarketStateAdapter.sol` | interface + types | The oracle seam. Owns the `Session` enum and `MarketState` struct |
+| `MarketHours.sol` | pure library | Timestamp → `Session`. Owns the `Session` enum. Calendar only |
+| `IMarketStateAdapter.sol` | interface + types | The oracle seam. Owns the `MarketState` struct |
 | `ChainlinkEquityAdapter.sol` | contract | v1 oracle: Data Feeds, liveness predicate, optional quote leg |
 | `Constants.sol` | library | Verified chain-4663 addresses |
 
@@ -73,6 +73,7 @@ The adapter quarantines every external call.
 never learns how it was produced:
 
 ```solidity
+// in MarketHours.sol, not the seam — the adapter has no session field to fill (B12)
 enum Session { Closed, Regular, Extended, Overnight }   // Closed = 0: zeroed state is fail-safe
 
 struct MarketState {
@@ -92,9 +93,11 @@ decoding `marketStatus` replaces `ChainlinkEquityAdapter` without touching the h
 curve, or any test of either. It is also what lets the whole hook be tested against a mock
 before a single real feed address is used.
 
-`Session` and `MarketState` live in the interface file, not in `MarketHours`, because both the
-calendar library and the adapter need them — defining them anywhere else creates a circular
-import. Decide this first; everything else follows from it.
+`MarketState` lives in the interface file because it *is* the seam. `Session` moved to
+`MarketHours.sol` in Round 5: once B12 removed the session field from `MarketState`, the adapter
+stopped needing the enum entirely, and a NYSE trading-session type sitting in the oracle interface
+misled anyone opening that file to write a second adapter. There is no import cycle — `MarketHours`
+depends only on `Constants` and `DateTimeLib`.
 
 ---
 
@@ -175,11 +178,14 @@ seam. Build note B1.
 pool ratio to `stockFeed / quotePrice` and `isLive` gains a quote-freshness term.
 
 ### `ClosingBellHook.sol` — `is BaseOverrideFee`
-- `constructor(poolManager, adapter, params, currency0, currency1, fee, tickSpacing)` — all `immutable`
+- `constructor(poolManager, adapter, FeeCurve.Params, PoolKey, bool stockIsToken1)` — all `immutable`;
+  the key's `hooks` field is overwritten with `address(this)` before hashing, so `poolId` is always
+  the real pool's id even if a deploy script mis-writes it
 - `_getFee(sender, key, params, hookData) → uint24` — the only abstract function of the base
 - `_afterInitialize(...)` — `super` (the `NotDynamicFee` check), then reject any pool whose key does
   not match the four configured components
-- internals: `_poolPrice(poolId)` (decimals-normalized from `sqrtPriceX96`),
+- internals: `_poolPrices(SwapParams)` and `_price(sqrtPriceX96)` (decimals-normalized),
+  `_estimatePostSqrtPrice`,
   `_estimatePostSwapPrice(sqrtPriceX96, liquidity, amountSpecified, zeroForOne)`
 
 `getHookPermissions()` and `_beforeSwap` are inherited; do not override them.
@@ -193,9 +199,12 @@ immutability or a write-once registry, and the registry is both weaker (storage,
 the exact property claimed against the admin-mutable prior art) and front-runnable by anyone who can
 predict the `PoolKey`.
 
-The apparent circularity — `poolId` depends on the hook address, which depends on the constructor
-args — is avoided by storing `currency0/currency1/fee/tickSpacing` rather than `poolId`. `hooks` is
-necessarily `address(this)`, so checking those four is equivalent and has no dependency loop.
+The apparent circularity — `poolId` hashes the key including `hooks`, and the hook address depends
+on the constructor args — is broken by assigning `key.hooks = IHooks(address(this))` in the
+constructor before hashing. Under CREATE2 the address is already final there (`BaseHook` relies on
+the same fact when it validates the permission flags), so the id is exact and no dependency loop
+exists. An earlier version stored the four key components instead; that avoided the loop too, but
+cost four immutables and a `PoolKey` rebuild plus a hash on every swap (B12).
 
 Rejecting in `_afterInitialize` reverts the whole `initialize` transaction, so the pool never comes
 into existence with this hook. No `beforeInitialize` bit is needed.

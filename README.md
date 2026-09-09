@@ -51,12 +51,13 @@ The pool stays open throughout, and uninformed weekend flow fills and pays LPs. 
 
 ### Liveness predicate
 
-"Live" means the calendar says open **and** the feed agrees:
+"Live" means the feed is usable. The calendar is deliberately **not** part of it: the session drives
+the floor, and the hook reads the calendar itself, so the oracle seam carries prices only (B12).
 
 ```
-isLive = calendarOpen
-      && updatedAt fresh          (maxStaleness > 86400s heartbeat — see below)
-      && price plausible vs last known
+isLive = price readable and > 0
+      && updatedAt fresh           (maxStaleness > 86400s heartbeat — see below)
+      && price plausible vs the last distinct print
       && quote feed fresh          (stock/SPY pools only)
       && !token.oraclePaused()     (ERC-8056 corporate-action freeze; ABI verified on-chain Sept 4)
 ```
@@ -69,7 +70,8 @@ Chainlink documents states where a market is nominally open but the price is fro
 
 - **Corporate actions — measured, then simplified.** Robinhood tokens expose `uiMultiplier()` (ERC-8056); AAPL's is 1.000566080061092436. Checking AAPL against both its Chainlink price and its deep pool settles the convention: the pool sits **0.4bp from the raw feed** versus 5.3bp under a divide-by-multiplier convention, on a multiplier worth 5.66bp. Both sides are already per-token, so **the hook applies no multiplier adjustment** — no per-swap external call, no transient cache. Residual edge case: if the multiplier and the feed price update at different moments, a transient basis appears. Evidence: [`docs/verified-onchain.md`](docs/verified-onchain.md).
 - **Stock/SPY pools.** The pool quotes SPY-per-stock; the stock feed is USD. The adapter takes an optional quote feed and compares the pool ratio to `stockFeed / quoteFeed`. Session and liveness stay keyed to the stock leg.
-- **Post-open decay.** After the reopen, only `deviationMult` decays (15 min, linear) so the pool can absorb the gap. The session floor and staleness term never decay; a 9:31 halt still pays the highest floor. The window is measured from the *calendar* reopen, not from an observed feed transition — **calendar time drives ramps, feed time drives liveness only** (B2).
+- **No post-open decay.** An earlier draft blended `deviationMult` back toward 1.0 over 15 minutes after the reopen. It was cut (B4): a decay clock is something an arbitrageur can wait out, and the surcharge already falls on its own as the gap closes. Ramps are driven by *calendar* time, liveness by feed time (B2).
+- **The reference window, not the last print.** Whether a gap belongs to the reference or to the pool is judged against the lowest and highest print in the feed's recent history. Anchoring on a single previous print let a trend of small prints, or a reopen followed by a retrace, be arbitraged at the floor (B9).
 - **Half the week is off-hours with a *live* reference.** `us_equities_24/5` means the feed runs continuously Sunday 20:00 ET → Friday evening, weekday overnight included. Regular hours are ~32.5h/week, the weekend dark window ~52h, and the remaining ~83.5h are off-hours where the deviation surcharge still has a working reference to measure against. Only ~31% of the week is genuinely blind, not the ~60% that "outside US market hours" suggests — which is why `elevatedFloor` sits near `baseFee` and the height is concentrated in `closedFloor` (B3).
 - **Restoring trades never get a discount below the session floor.** A discount invites wash flow that farms cheap rebalancing against the LP. (Ballast discounts below base for restoring trades; this is the deliberate divergence.)
 - **The reopen is priced, not exempted.** When the reference wakes — Sunday ~20:00 ET for these feeds — the gap it reveals is reference-created, so the arbitrage that captures it is charged `f(·)` despite moving the pool toward fair value.
@@ -85,15 +87,14 @@ The hook's users are pool creators — issuers, professional LPs, Robinhood itse
 
 | Parameter | What it controls | v1 default |
 |---|---|---|
-| `baseFee` | Floor during regular hours, live | pool's normal tier `[TBD: tuned]` |
-| `elevatedFloor` | Floor for pre/post/overnight sessions — reference is still live here, so this sits near `baseFee` (B3) | `[TBD: tuned]` |
-| `closedFloor` | Floor when calendar-closed or open-but-stale/implausible | `[TBD: tuned]` |
-| staleness curve | `stalenessMult` vs time since **session close**, capped (B2) | `[TBD: tuned]` |
+| `baseFee` | Floor during regular hours, live | 500 pips = 5 bps *(provisional)* |
+| `elevatedFloor` | Floor for pre/post/overnight sessions — reference is still live here, so this sits near `baseFee` (B3) | 800 pips = 8 bps *(provisional)* |
+| `closedFloor` | Floor when calendar-closed, or the feed is unusable | 3_000 pips = 30 bps *(provisional)* |
+| staleness curve | `stalenessMult` vs time since **session close**, capped (B2) | slope `1.0684e13`/sec, cap 3.0x *(provisional)* |
 | deviation curve | Piecewise-linear knots for `f(\|dev\|)` | `[TBD: tuned]` |
-| `feeCap` | Single cap on the full product | 300–500 bps = **30_000–50_000 pips** |
-| `decayWindow` | Post-open blend of `deviationMult` toward 1.0 | 15 min, linear |
+| `feeCap` | Single cap on the full product; must be **below** 100% or v4 rejects exact-output swaps | 40_000 pips = 400 bps *(provisional)* |
 | `quoteFeed` | Optional second feed for non-dollar quote legs (stock/SPY) | `address(0)` for stock/USDG |
-| `maxStaleness`, plausibility bound | Liveness-predicate thresholds. `maxStaleness` **above** the 86400s heartbeat — dead-feed net, not halt detector (B1) | `[TBD: tuned]` |
+| `maxStaleness`, plausibility bound | Liveness-predicate thresholds. `maxStaleness` **above** the 86400s heartbeat — dead-feed net, not halt detector (B1) | 2 days, 2000 bps *(provisional)* |
 
 ## Oracle: what v1 reads, and what it doesn't
 
@@ -134,9 +135,9 @@ If most of v1's protection turns out to be floor × staleness, that is the findi
               │  session ← MarketHours.sol  │        │  v1: ChainlinkEquityAdapter    │
               │  isLive (liveness predicate)│        │    Data Feed price, updatedAt  │
               │  staleness mult             │        │    optional quoteFeed          │
-              │  deviation mult (signed,    │        │    try/catch every call —      │
-              │    post-swap estimate, F1)  │        │    getMarketState() is total   │
-              │  post-open decay            │        │  prod: Streams marketStatus    │
+              │  deviation mult (signed,    │        │    raw staticcall, length-     │
+              │    post-swap estimate, F1)  │        │    checked: never reverts      │
+              │  window rule (B9)           │        │  prod: Streams marketStatus    │
               │  FeeCurve → min(floor×m×m,  │        │    (per-schema decode)         │
               │             cap) → override │        └────────────────────────────────┘
               └─────────────┬───────────────┘
@@ -149,11 +150,11 @@ If most of v1's protection turns out to be floor × staleness, that is the findi
 | File | What it is |
 |---|---|
 | [`src/ClosingBellHook.sol`](src/ClosingBellHook.sol) | The hook, `is BaseOverrideFee`. Permissions `afterInitialize + beforeSwap` (salt `0x1080`); implements `_getFee` only. Constructor-immutable params, one instance per pool; `_afterInitialize` rejects any other pool. `[TBD: line pointers]` |
-| [`src/FeeCurve.sol`](src/FeeCurve.sol) | Pure library: floors, staleness and deviation multipliers, signed rule, decay, cap |
-| [`src/MarketHours.sol`](src/MarketHours.sol) | Pure library: UTC→ET with DST, session windows, NYSE holiday table |
-| [`src/IMarketStateAdapter.sol`](src/IMarketStateAdapter.sol) | Adapter interface: one underlying per pool for session; optional quote price for deviation |
-| [`src/ChainlinkEquityAdapter.sol`](src/ChainlinkEquityAdapter.sol) | v1 adapter: Data Feed price/`updatedAt`, optional quote feed, `oraclePaused()`, liveness predicate |
-| [`src/Constants.sol`](src/Constants.sol) | Verified Robinhood Chain addresses. The PoolManager is **non-canonical** on this chain |
+| [`src/FeeCurve.sol`](src/FeeCurve.sol) | Pure library: floors, staleness and deviation multipliers, the signed direction rule, the reference window, cap |
+| [`src/MarketHours.sol`](src/MarketHours.sol) | Pure library: UTC→ET with DST, session windows, NYSE holidays as **rules** (no table, nothing to expire) |
+| [`src/IMarketStateAdapter.sol`](src/IMarketStateAdapter.sol) | The oracle seam: one `view` call returning prices and their recent window. Must never revert |
+| [`src/ChainlinkEquityAdapter.sol`](src/ChainlinkEquityAdapter.sol) | v1 adapter: Data Feed price and round history, optional quote feed, `oraclePaused()`, liveness predicate |
+| [`src/Constants.sol`](src/Constants.sol) | Fixed-point units, NYSE clock times, feed-history lookback. Verified chain addresses live in [`docs/verified-onchain.md`](docs/verified-onchain.md) — the PoolManager is **non-canonical** here |
 
 **Uniswap v4 integration points** `[TBD: exact lines]`: hook permissions (`beforeSwap`), dynamic-fee flag on pool init, fee override return in `beforeSwap`, `StateLibrary` reads for the post-swap estimate.
 
@@ -198,6 +199,46 @@ Five hooks surveyed as of **Sept 4 2026**, all verified directly from source or 
 Verification with line numbers, timestamps and licences: [`docs/prior-art-verification.md`](docs/prior-art-verification.md). Ballast and StockShield carry no licence file; nothing was copied from any of them.
 
 Caveat: this is a survey of five named hooks on one date, not proof of absence — 489 distinct non-zero hook addresses are live on Robinhood Chain, most undocumented.
+
+## AI tools: what was generated, and what was directed
+
+Per ETHGlobal's AI attribution rule, stated file by file. **Claude Code (Claude Opus 5) wrote most
+of the Solidity in this repository.** It was used as an implementation and review tool against
+specifications and decisions made by the author.
+
+| | Written by | Specified / decided by |
+|---|---|---|
+| [`docs/proposal.md`](docs/proposal.md) | author (pre-window, revisions r1-r7, disclosed) | author |
+| [`src/IMarketStateAdapter.sol`](src/IMarketStateAdapter.sol) | author, with AI edits to field set and ordering | author |
+| [`src/FeeCurve.sol`](src/FeeCurve.sol) | mixed: author wrote the `Params` struct and the shape of `floorFor`; AI wrote the remaining bodies | author |
+| [`src/MarketHours.sol`](src/MarketHours.sol) | AI, from a written spec by the author | author |
+| [`src/ClosingBellHook.sol`](src/ClosingBellHook.sol) | AI | author |
+| [`src/ChainlinkEquityAdapter.sol`](src/ChainlinkEquityAdapter.sol) | AI, test-first against a spec reviewed by the author | author |
+| [`test/`](test/) (2,545 lines, 172 tests) | AI | author |
+| [`docs/architecture.md`](docs/architecture.md), [`docs/build-notes.md`](docs/build-notes.md) | AI, recording decisions the author made | author |
+| Prior-art analysis ([`docs/prior-art-fables.md`](docs/prior-art-fables.md), [`docs/prior-art-verification.md`](docs/prior-art-verification.md)) | AI research, author-directed | author |
+
+**The review process, which is where most of the engineering happened.** Five audit rounds were run
+using a human-in-the-loop audit protocol ([`.claude/skills/`](.claude/skills/), mandates recorded in
+[`docs/audit-rounds.md`](docs/audit-rounds.md)). Each round froze a baseline commit, fanned out
+independent AI reviewers with deliberately different adversarial mandates, and produced findings
+with reproducible traces. **The author adjudicated every finding** — severity, whether it was real,
+what to fix, and what to accept and document. The protocol explicitly forbids the loop closing its
+own findings, and it did not. Fixes were then AI-written, and each was mutated back out to confirm a
+test fails without it.
+
+That process found, among others: a reopen-arbitrage charge bypassable by moving the pool one wei
+(B7), a `try/catch` pattern that did not actually make the oracle call safe (B10), a
+reference-tracking rule that gave away the floor on any gap the pool had not tracked (B9), and an
+arithmetic overflow that would have bricked every swap in the pool (B13). Two of those were
+introduced by earlier AI-written fixes and caught by later rounds.
+
+**What was not AI-directed.** The mechanism is the author's: conditioning the fee on a trading
+calendar rather than volatility; the finding that Chainlink's `updatedAt` cannot detect a halt on
+these feeds, which killed the original staleness design (B1); driving the fee ramp from calendar
+time rather than feed age (B2); the floor ordering (B3); and the attribution rule that charges by
+*who created* a price gap, which is the sharpest difference from the surveyed prior art. Every one
+of those came out of author review that overruled an earlier design.
 
 ## Feedback to Uniswap
 

@@ -1,39 +1,26 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-/// @notice Which trading session the stock market is in. Sets the fee floor. Derived from the
-///         NYSE calendar in `MarketHours`, not from the oracle.
-///         `Closed` is deliberately the zero value: an empty struct reads as the safe default.
-enum Session {
-    Closed,
-    Regular,
-    Extended,
-    Overnight
-}
-
-/// @notice Everything the hook needs to know about the outside world for one swap.
+/// @notice Everything the hook needs to know about the outside world to price one swap.
 struct MarketState {
-    bool isLive; // can the price below be trusted? false if the feed is dead, stale, implausible or paused
-    uint256 price; // the stock's reference price, 1e18 units; 0 if the feed could not be read
-    // The lowest and highest print in the feed's recent history (the last few rounds, current
-    // print included). The hook treats the pool as "still following the reference" if it sits
-    // within the move of any print in this window, so a trend of small prints, or a reopen
-    // followed by a retrace, cannot be arbitraged at the floor. lo == hi == price means the
-    // reference has not moved. Both 0 if history is unknown — the hook then charges.
+    bool isLive; // can we trust the price below? false if the feed is broken, stale or frozen
+    uint256 price; // what the stock is really worth; 0 if we could not find out
+    // Highest and lowest prices published recently. The hook uses this range to work out whether a
+    // gap is the stock's doing or the pool's (B9). Both equal to the price above means no move;
+    // both zero means we do not know, so we charge.
     uint256 loPrice;
     uint256 hiPrice;
-    bool hasQuoteFeed; // true when the pool's other token is not a dollar (e.g. stock/SPY)
-    uint256 quotePrice; // that token's reference price, 1e18; only meaningful if hasQuoteFeed
-    uint256 loQuotePrice; // its window, same contract as loPrice/hiPrice; only if hasQuoteFeed
+    bool hasQuoteFeed; // true when the pool prices the stock in something other than dollars
+    uint256 quotePrice; // what that other thing is worth, and its recent range
+    uint256 loQuotePrice;
     uint256 hiQuotePrice;
 }
 
-/// @notice The oracle boundary. The hook reads a `MarketState` and never needs to know where it
-///         came from — Chainlink feeds today, a different source tomorrow, a mock in tests.
+/// @notice The line between the hook and the outside world. The hook never needs to know where
+///         prices came from, so the source can be swapped without touching the fee logic.
 interface IMarketStateAdapter {
-    /// @notice The current market state for this pool's stock.
-    /// @dev MUST NEVER REVERT. If anything goes wrong reading a feed, return `isLive = false`
-    ///      (and `price = 0`) — the hook then charges the highest floor and the pool stays open.
-    ///      An adapter that reverts would block every swap in the pool.
+    /// @notice What the stock is worth right now, and whether that can be trusted.
+    /// @dev MUST NEVER FAIL. On any problem report `isLive = false` and `price = 0`: the hook then
+    ///      charges its highest rate and the pool keeps trading. A failure blocks every swap.
     function getMarketState() external view returns (MarketState memory);
 }

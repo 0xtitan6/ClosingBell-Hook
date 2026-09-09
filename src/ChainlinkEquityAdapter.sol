@@ -7,24 +7,21 @@ import {MarketState, IMarketStateAdapter} from "./IMarketStateAdapter.sol";
 import {AggregatorV3Interface, IOraclePausable} from "./AggregatorV3Interface.sol";
 import {Constants as C} from "./Constants.sol";
 
-/// @notice v1 oracle for ClosingBell: Chainlink Data Feeds plus the NYSE calendar.
+/// @notice Where the hook gets the stock's real price: Chainlink's published feeds. Reports the
+///         latest price, the recent range, and whether any of it can be trusted.
 ///
-/// Stateless and total. Every external read is a raw staticcall whose return data is length-
-/// checked and decoded by hand, because `try/catch` cannot catch a decoding failure in the
-/// caller. Anything that fails degrades to "not live" and the hook charges its highest floor
-/// with the pool still open. Nothing here can block a swap.
-///
-/// `isLive` is a dead-feed net, not a halt detector (build note B1): the price is fresh, plausible
-/// against the previous distinct print, the token's corporate-action flag is clear, and the quote
-/// leg (if any) is fresh too. `maxStaleness` must sit above the feed's 86400s heartbeat.
+///         Nothing here can fail. If it could, every swap would stop working, and it would happen
+///         exactly when the feed is least healthy and the pool most needs protecting.
+/// @dev Stateless. "Not live" means a broken feed, not a trading halt (B1), so `maxStaleness`
+///      must sit above the feed's 24-hour heartbeat.
 contract ChainlinkEquityAdapter is IMarketStateAdapter {
     error InvalidConfig();
 
     AggregatorV3Interface public immutable stockFeed;
-    AggregatorV3Interface public immutable quoteFeed; // address(0) for dollar-quote pools
-    address public immutable stockToken; // address(0) to skip the oraclePaused() check
-    uint256 public immutable maxStaleness; // seconds; above the 86400s heartbeat
-    uint256 public immutable plausibilityBps; // max jump vs the previous distinct print; 0 disables
+    AggregatorV3Interface public immutable quoteFeed; // only for pools priced in something but dollars
+    address public immutable stockToken; // the token itself, which can flag a corporate action
+    uint256 public immutable maxStaleness; // how old a price can get before we stop trusting it
+    uint256 public immutable plausibilityBps; // how big a one-step jump we believe; 0 accepts any
 
     struct Round {
         bool ok;
@@ -33,8 +30,8 @@ contract ChainlinkEquityAdapter is IMarketStateAdapter {
         uint256 updatedAt;
     }
 
-    /// @dev Every address is dry-read here. A feed or token that cannot be read at deployment
-    ///      would pin the pool at the closed floor forever, and nothing here can be changed later.
+    /// @dev Reads every address once before accepting it. None can be changed later, so one that
+    ///      does not answer would leave the pool stuck at its highest fee forever.
     constructor(
         address stockFeed_,
         address quoteFeed_,
@@ -75,8 +72,8 @@ contract ChainlinkEquityAdapter is IMarketStateAdapter {
 
     // ── one feed ────────────────────────────────────────────────────────────
 
-    /// @dev Latest price, the low/high of the recent window, the previous distinct print, and the
-    ///      latest print time. All zero on failure; lo/hi zero if no history could be read.
+    /// @dev Everything one feed can tell us: latest price, the highest and lowest recently, the
+    ///      last price that differed, and when it was published. All zero if it cannot be read.
     function _leg(AggregatorV3Interface feed)
         internal
         view
@@ -94,11 +91,9 @@ contract ChainlinkEquityAdapter is IMarketStateAdapter {
         last = _scale(rawLast, dec);
     }
 
-    /// @dev Walk LOOKBACK rounds behind the latest. The window is min/max over those prints plus
-    ///      the latest one; `last` is the first print that differs from the latest (0 if none).
-    ///      A pool that tracked any print in the window is inside the hook's band, so a trend of
-    ///      small prints or a reopen-then-retrace cannot be arbitraged at the floor (B6, B9).
-    ///      Stops at the first unreadable round; if none could be read, lo = hi = 0 (unknown).
+    /// @dev Walks back through recent prices for the highest and lowest. That range is how the
+    ///      hook decides whether a gap is the stock's doing or the pool's. Stops at the first
+    ///      unreadable one; if none can be read it reports nothing and the hook charges.
     function _window(address feed, uint80 id, int256 answer)
         internal
         view
@@ -121,6 +116,7 @@ contract ChainlinkEquityAdapter is IMarketStateAdapter {
 
     // ── raw reads: length-checked, hand-decoded, never revert ───────────────
 
+    /// @dev Calls another contract without ever failing: checks code is there, then the reply's size.
     function _call(address target, bytes memory data, uint256 minLen) internal view returns (bool ok, bytes memory r) {
         if (target.code.length == 0) return (false, r);
         (ok, r) = target.staticcall(data);
@@ -148,7 +144,8 @@ contract ChainlinkEquityAdapter is IMarketStateAdapter {
         return Round(true, uint80(rid), answer, updatedAt);
     }
 
-    /// @dev Feed units to 1e18. 0 if the answer is not positive or the scaling would overflow.
+    /// @dev Feeds publish in their own units; this puts them on one scale. 0 if the price is
+    ///      negative, zero, or too large.
     function _scale(int256 answer, uint256 dec) internal pure returns (uint256) {
         if (answer <= 0 || dec > 77) return 0;
         uint256 a = uint256(answer);
@@ -161,18 +158,22 @@ contract ChainlinkEquityAdapter is IMarketStateAdapter {
 
     // ── the liveness predicate ──────────────────────────────────────────────
 
+    /// @dev Published recently enough to trust? A future timestamp is a clock difference, not a
+    ///      stale price, so it counts as fresh.
     function _fresh(uint256 updatedAt) internal view returns (bool) {
         return updatedAt >= block.timestamp || block.timestamp - updatedAt <= maxStaleness;
     }
 
-    /// @dev Within plausibilityBps of the previous distinct print. Nothing to compare against passes.
+    /// @dev A believable step from the last price? Catches a feed glitch printing a wild number.
+    ///      Nothing to compare against means accept.
     function _plausible(uint256 price, uint256 last) internal view returns (bool) {
         if (plausibilityBps == 0 || last == 0) return true;
         uint256 diff = price > last ? price - last : last - price;
         return diff <= FullMath.mulDiv(last, plausibilityBps, 10_000);
     }
 
-    /// @dev ERC-8056 oraclePaused(). Unreadable, or any non-zero word, counts as paused: fail adverse.
+    /// @dev Tokenized stocks flag themselves frozen during a corporate action like a split, when
+    ///      the published price no longer lines up with the token. Unreadable counts as frozen.
     function _paused() internal view returns (bool) {
         if (stockToken == address(0)) return false;
         (bool ok, bytes memory r) = _call(stockToken, abi.encodeCall(IOraclePausable.oraclePaused, ()), 32);

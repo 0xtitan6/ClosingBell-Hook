@@ -261,7 +261,22 @@ LeetCode: one problem/day for the window. Ornn article starts Sept 17.
 - [ ] Permissioned Pools deployment status on chain 4663 (unconfirmed either way)
 - [ ] Re-verify the multiplier convention during regular hours — Tuesday Sept 8 (Monday is Labor Day)
 - [ ] Permissioned Pools: read the spec; confirm it does not express session state
-- [x] ETHOnline rules — DONE. Classic "From Scratch" track: project code starts at kickoff; public libraries/boilerplate permitted; pre-existing work must be **disclosed in writing** to ETHGlobal and in the submission; frequent commits required (single large commits are "default assumed unqualified"); repo must remain public. **Submission deadline Sunday Sept 13, 12:00 pm EDT** — not Sept 16. A ≤4-minute video is required and speed-ups are disqualifying
+- [x] ETHOnline rules — DONE, re-checked against the official page Sept 9. Classic "From Scratch"
+  track: project code starts at kickoff; public libraries/boilerplate permitted; pre-existing work
+  must be **disclosed in writing**; frequent commits required (large single commits "may be
+  disqualified"); repo must remain public. **Submission deadline Sunday Sept 13, 12:00 pm EDT**.
+  Up to **3 partner prizes** may be selected, and each needs an integration write-up plus feedback.
+  - **Video: 2 to 4 minutes.** Under 2 minutes or over 4 is auto-rejected at upload. Minimum 720p.
+    No speed-ups, no AI voiceover, no phone recording, no music-over-text in place of narration.
+  - **AI tools are permitted with attribution.** The submission must "clearly document where and
+    how AI tools were used ... which parts of the code, specific files, or assets were generated or
+    assisted by AI." Projects relying *entirely* on AI, without meaningful contribution from the
+    team, are ineligible for partner prizes and finalist consideration.
+  - **Spec-driven workflows are permitted**, but then "all spec files, prompts, and planning
+    artifacts" must be in the repo. `docs/` already holds the design doc, architecture and the
+    B1-B13 build notes; the adapter's spec sits in the header of its test file.
+  - Judging: Technicality, Originality, Practicality, Usability, WOW. Async round screens roughly
+    the top 20% into live judging; partner prizes are decided separately and are unaffected by it.
 - [ ] File the pre-work disclosure (design doc, README, v4-template scaffold) with ETHGlobal before building
 - [x] `uiMultiplier()` ABI on a live stock token — DONE Sept 4; `oraclePaused()` also verified present and returning `false`, so the r5 liveness term is real and not speculative
 

@@ -327,6 +327,9 @@ gas; with a dead feed 70k; `getMarketState` alone 65k.
 
 ## B12 — Cut the fields the hook never reads
 
+**Overrides:** architecture.md §4 (constructor signature and the pool-key rationale), and B10's
+"both stay in the struct for adapters and tooling".
+
 `MarketState` carried `session` and `updatedAt`. The hook decoded both and used neither: the
 session comes from `MarketHours.calendar`, which the hook calls itself, and `updatedAt` is dead by
 B1 (it cannot detect a halt on these feeds). Filling `session` meant the adapter ran the whole NYSE
@@ -354,3 +357,50 @@ Measured, production layout, warm:
 the proposal's plan was for it to arrive through this struct. It would reintroduce a session field
 then. Paying 3-12k gas per swap now, on every trade, to hold a slot open for a v2 that does not
 exist is the wrong trade; the interface change is a one-line struct edit when that day comes.
+
+## B13 — Round 5: two bugs, one of them mine from the day before
+
+Two reviewers, fresh mandates: a holistic senior review and a pure bug hunt.
+
+**The band arithmetic could revert, and a revert on the swap path bricks the pool (High).**
+`referenceMoved` computed the band as `2*lo - ref` and `2*hi - ref`. The doubling of `hi` was
+guarded against overflow; the doubling of `lo` was not, and in checked arithmetic `2 * lo` panics
+before the comparison that was supposed to guard it. An 8-decimal feed answer at or above ~5.79e66
+scales to a price above `uint256.max / 2`, and every swap in the pool then reverted — including
+through the real router, and including when the feed was flagged not live, because the deviation
+term runs whenever a reference exists. Every other piece of arithmetic that touches feed data
+(`_scale`, `_ratio`, `_dev`, `computeFee`, `abs`) saturates for exactly this reason; this one line
+did not. The band is now written as `l - (ref - l)` and `h + (h - ref)`, which is the same
+interval with no intermediate that can overflow, saturating upward only. A window reported
+backwards (`lo > hi`) now charges rather than exempting, since the seam is meant to be swappable.
+
+**B12's pool-id collapse added a deploy footgun (Medium).** `toId()` hashes the whole key, `hooks`
+included, and the four-field comparison it replaced deliberately excluded that field — this
+document said so, and the note replacing it did not add the guard that made the change safe. A
+deploy script that mines the address but mis-writes the key produced a hook that constructs and
+verifies but whose pool can never be initialized. It is fail-closed, not fail-open: the id check
+still rejects every wrong pool, and `_poolPrices` can never read a different pool's slot0. The
+constructor now assigns `key.hooks = address(this)` before hashing, which removes the failure mode
+rather than detecting it.
+
+**The decimals guard was the wrong guard (Low).** B7 documented rejecting a decimals gap above 18;
+the code checked absolute decimals above 24 instead. With a gap of 21 or more, `_price` overflows
+at v4's own `MIN_SQRT_PRICE`, which the post-swap estimate reaches whenever an exact-output swap
+asks for more than the pool holds — turning a legal, partially-fillable v4 swap into a revert. Both
+bounds are now enforced. Not reachable in the production 6/18 layout.
+
+**Documentation drift, corrected.** The README still described post-open decay, deleted in B4,
+including a `decayWindow` parameter row; defined `isLive` with a calendar term the adapter no
+longer has; advertised "try/catch every call" in its diagram, which is the anti-pattern B10 exists
+to correct; and claimed `Constants.sol` holds verified chain addresses, which it never has. The
+parameter table now carries the values the end-to-end test actually uses, marked provisional,
+rather than `[TBD: tuned]`.
+
+**Verified sound by the bug hunt**, and worth recording because these are the load-bearing claims:
+the B12 hand-decode is exactly 256 bytes with field order matching the struct, checked field by
+field against the live adapter; the window rule's union identity holds under 40,000 fuzz runs
+against a brute-force model, including when the reference sits outside the window; and every
+weekday from 2024 to 2040 that `MarketHours` calls closed matches an independently written NYSE
+model exactly, 167 holidays, with `lastClose` fuzzed 20,000 times across DST boundaries.
+
+172 tests pass at `--fuzz-runs 10000`. Every fix above was mutated out and confirmed to fail a test.

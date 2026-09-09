@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-/// @notice The subset of Chainlink's AggregatorV3Interface the adapter reads.
+/// @notice The parts of a Chainlink price feed this project reads.
 interface AggregatorV3Interface {
     function decimals() external view returns (uint8);
     function latestRoundData()
@@ -14,7 +14,7 @@ interface AggregatorV3Interface {
         returns (uint80 roundId_, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound);
 }
 
-/// @notice ERC-8056 corporate-action flag on tokenized stocks: while true the reference is frozen.
+/// @notice Tokenized stocks flag themselves frozen during a corporate action such as a split.
 interface IOraclePausable {
     function oraclePaused() external view returns (bool);
 }

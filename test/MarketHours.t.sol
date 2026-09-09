@@ -4,7 +4,7 @@ pragma solidity ^0.8.28;
 import {Test} from "forge-std/Test.sol";
 import {DateTimeLib} from "solady/utils/DateTimeLib.sol";
 import {MarketHours} from "../src/MarketHours.sol";
-import {Session} from "../src/IMarketStateAdapter.sol";
+import {Session} from "../src/MarketHours.sol";
 
 /// Fixed points for the NYSE calendar. Timestamps are built independently of the library under
 /// test: ET wall-clock + a hardcoded offset (EDT 4h / EST 5h chosen per date; every date used is
