@@ -229,3 +229,26 @@ LPs. Noted as an MEV-sandwich amplifier, not a standalone profit.
 
 *Never read by the hook:* `MarketState.session` and `updatedAt`. The session comes from
 `MarketHours`; `updatedAt` is dead by B1. Both stay in the struct for adapters and tooling.
+
+## B8 — Adapter: stateless `prevPrice` from feed gaps
+
+**Refines:** B6's adapter contract.
+
+B6 asked the adapter for "the last print at or before the close" after a reopen. Two constraints
+shaped how: the adapter must be `view` (the hook reaches it by `staticcall`), so it cannot remember
+anything; and `MarketHours.calendar` returns `lastClose = now` whenever the market is open, so on
+Sunday night there is no calendar signal saying "you just reopened".
+
+The closure is read off the feed instead. Walking back through round history, a gap of
+`CLOSURE_GAP = 36h` between consecutive prints can only be a market closure — the feeds are dark
+~52h on a weekend and ~76h on a holiday weekend, while a quiet trading day is at most the 24h
+heartbeat. The print before that gap is `prevPrice`, even if a different print sits between it and
+the latest (reopen then retrace). Otherwise `prevPrice` is the previous *different* print, with
+heartbeat re-prints skipped. The walk is bounded at `LOOKBACK = 6` rounds; once six distinct
+prints have landed after a reopen the closure scrolls out and the ordinary rule applies, which is
+also when the pool has had ample time to track. Unknown (new feed, phase boundary, reverting
+history) → 0 → the hook charges by default.
+
+Tests were written before the contract (`test/ChainlinkEquityAdapter.t.sol`, 36 cases including
+a totality fuzz over answer, timestamp, decimals and round id); the adapter was built to them.
+Measured `getMarketState` gas, dollar quote, six history reads: ~57k.

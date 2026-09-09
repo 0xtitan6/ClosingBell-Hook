@@ -141,14 +141,26 @@ both denominated per-token, so no `uiMultiplier()` read and no transient cache a
 (`verified-onchain.md` §4). This removes an external call from every swap.
 
 ### `ChainlinkEquityAdapter.sol`
-- `constructor(stockFeed, quoteFeed, stockToken, maxStaleness, plausibilityBps)` — all immutable
-- `getMarketState()` — every external call wrapped in `try/catch`; failure → `isLive = false`
-- internals: `_readFeed(feed) → (price, updatedAt, ok)`, `_isPlausible(price)`
+- `constructor(stockFeed, quoteFeed, stockToken, maxStaleness, plausibilityBps)` — all immutable;
+  `quoteFeed` and `stockToken` may be zero; rejects `maxStaleness <= 1 days`
+- `getMarketState()` — `view`, stateless, total: every external read behind `try/catch` plus an
+  explicit `code.length` check (a no-code address returns empty data, which `try/catch` cannot
+  catch); any failure → `price = 0`, `isLive = false`
+- internals: `_leg(feed) → (price, prevPrice, updatedAt)`, `_prevAnswer` (round-history walk),
+  `_scale` (feed decimals → 1e18, overflow → 0), `_fresh`, `_plausible`, `_paused`
 
-Guard the no-code case explicitly (`feed.code.length == 0` returns success with empty returndata).
-On a failed read, return the **last known good price**, not zero — a frozen feed should still be
-deviated against its last real reference, which is exactly the weekend case. Zero only when the
-adapter has never seen a good price, and the hook must then price on floor x staleness alone.
+No storage. The adapter used to be specified with a `lastKnownPrice`; a stateful adapter cannot
+be `view`, and the hook calls it under `staticcall`. The "last known price" is simply the feed's
+latest round, which Chainlink keeps returning after the market closes — a frozen feed is still
+deviated against its last real print. Zero only when the feed itself cannot be read.
+
+`prevPrice` comes from round history (`getRoundData(latest - i)`, at most `LOOKBACK = 6` rounds):
+skip re-prints of the same answer; if two consecutive rounds are `CLOSURE_GAP = 36h` or more
+apart, the market was closed between them and the print *before* the closure wins even when a
+different print sits in between — so a reopen followed by a retrace (100 → 103 → 102) reports
+`prev = 100`, not 103 (B6). The calendar cannot supply this: `MarketHours.calendar` returns
+`lastClose = now` whenever the market is open, so the closure is read off the feed's own gaps.
+A quiet day's 24h heartbeat gap does not qualify. Unknown history → 0 → the hook charges.
 
 **Size `maxStaleness` above the 86400s heartbeat.** It is a dead-feed safety net, not a halt
 detector — anything tight enough to catch a 5–15 minute LULD halt fires on quiet regular sessions
