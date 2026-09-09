@@ -39,6 +39,24 @@ contract FeeCurveTest is Test {
         });
     }
 
+    // ── validate ────────────────────────────────────────────────────────────────
+
+    function test_validate_fixtureIsValid() public view {
+        assertTrue(FeeCurve.validate(P));
+    }
+
+    function test_validate_rejectsEachBrokenInvariant() public view {
+        FeeCurve.Params memory q;
+        q = P; q.baseFee = 900;               assertFalse(FeeCurve.validate(q), "base > elevated");
+        q = P; q.elevatedFloor = 3500;        assertFalse(FeeCurve.validate(q), "elevated > closed");
+        q = P; q.closedFloor = 50_000;        assertFalse(FeeCurve.validate(q), "closed > cap");
+        q = P; q.feeCap = 1_000_001;          assertFalse(FeeCurve.validate(q), "cap > MAX_LP_FEE");
+        q = P; q.feeCap = LPFeeLibrary.MAX_LP_FEE; assertFalse(FeeCurve.validate(q), "cap at 100% blocks exact-output swaps in v4");
+        q = P; q.stalenessMax = 5e17;         assertFalse(FeeCurve.validate(q), "stalenessMax < 1");
+        q = P; q.baseFee = 0;                 assertTrue(FeeCurve.validate(q), "zero base is allowed");
+        q = P; q.feeCap = LPFeeLibrary.MAX_LP_FEE - 1; assertTrue(FeeCurve.validate(q), "cap just under 100% is allowed");
+    }
+
     // ── floorFor ────────────────────────────────────────────────────────────────
 
     function test_floorFor() public view {
@@ -145,15 +163,38 @@ contract FeeCurveTest is Test {
         pool = bound(pool, 1, 1e30);
         a = bound(a, 1, 1e30);
         b = bound(b, 1, 1e30);
-        // Symmetric in which print is "previous".
-        assertEq(FeeCurve.referenceMoved(pool, a, b), FeeCurve.referenceMoved(pool, b, a), "order of prints irrelevant");
         // Identical prints never read as a move.
         assertFalse(FeeCurve.referenceMoved(pool, a, a));
-        // Moving the pool further INTO the band never turns the flag off.
-        if (a != b && FeeCurve.referenceMoved(pool, a, b)) {
-            uint256 mid = (a + b) / 2;
-            assertTrue(FeeCurve.referenceMoved(mid, a, b), "midpoint is inside the band");
+        if (a == b) return;
+        // Anywhere between the two prints (inclusive) is "moved", whichever print is previous.
+        (uint256 lo, uint256 hi) = a < b ? (a, b) : (b, a);
+        if (pool >= lo && pool <= hi) {
+            assertTrue(FeeCurve.referenceMoved(pool, a, b), "between the prints: moved");
+            assertTrue(FeeCurve.referenceMoved(pool, b, a), "between the prints: moved (either order)");
         }
+        // The band is symmetric around the PREVIOUS print, with radius = the size of the move.
+        uint256 move = hi - lo;
+        if (pool <= 2 * b) {
+            uint256 mirror = 2 * b - pool;
+            assertEq(FeeCurve.referenceMoved(pool, a, b), FeeCurve.referenceMoved(mirror, a, b), "mirror around prev");
+        }
+        // Further from the previous print than the move itself: the gap is the pool's own.
+        if (pool > b + move || (b > move && pool < b - move)) {
+            assertFalse(FeeCurve.referenceMoved(pool, a, b), "outside the radius: pool-created");
+        }
+    }
+
+    function test_referenceMoved_pastTheOldPrint_isStillMoved() public pure {
+        // Round 3 H1: a pool nudged a wei below the old print before the close must not read as a
+        // pool-created gap when the reference then gaps up. The band extends |move| on both sides
+        // of the previous print.
+        assertTrue(FeeCurve.referenceMoved(999998e14, 103e18, 100e18), "a hair below prev, ref moved up");
+        assertTrue(FeeCurve.referenceMoved(1000002e14, 97e18, 100e18), "a hair above prev, ref moved down");
+        assertTrue(FeeCurve.referenceMoved(97e18, 103e18, 100e18), "mirror edge: gap == move (inclusive)");
+        assertFalse(FeeCurve.referenceMoved(969999e14, 103e18, 100e18), "just past the mirror edge: pool-created");
+        // Escaping costs a real pre-paid gap larger than the move, in the right direction.
+        assertFalse(FeeCurve.referenceMoved(96e18, 103e18, 100e18));
+        assertTrue(FeeCurve.referenceMoved(96e18, 104e18, 100e18), "guessed the wrong direction: charged on the whole gap");
     }
 
     // ── isRestoring (F1, signed) ────────────────────────────────────────────────
@@ -253,9 +294,11 @@ contract FeeCurveTest is Test {
         assertEq(FeeCurve.computeFee(P, 800, ONE, 2e18), 1600, "elevated x 2 = 16bps");
     }
 
-    function test_computeFee_roundsUp() public view {
-        assertEq(FeeCurve.computeFee(P, 500, ONE + 1, ONE), 501, "sub-pip rounds up, LP-favourable");
-        assertEq(FeeCurve.computeFee(P, 999, 1_001_000_000_000_000_000, ONE), 1000, "999 x 1.001 -> 1000");
+    function test_computeFee_roundsToNearest() public view {
+        assertEq(FeeCurve.computeFee(P, 500, ONE + 1, ONE), 500, "a wei of multiplier does not add a pip");
+        assertEq(FeeCurve.computeFee(P, 500, ONE + ONE / 1000, ONE), 501, "500.5 -> 501 (half rounds up)");
+        assertEq(FeeCurve.computeFee(P, 500, ONE + ONE / 1001, ONE), 500, "500.4995 -> 500");
+        assertEq(FeeCurve.computeFee(P, 999, 1_001_000_000_000_000_000, ONE), 1000, "999.999 -> 1000");
     }
 
     function test_computeFee_singleCap() public view {
@@ -350,7 +393,8 @@ contract FeeCurveTest is Test {
     function test_edge_capAboveMaxLPFee_clamped() public view {
         FeeCurve.Params memory q = P;
         q.feeCap = type(uint24).max; // 16_777_215 > MAX_LP_FEE: a one-digit slip in config
-        assertEq(FeeCurve.computeFee(q, 900_000, 3e18, ONE), LPFeeLibrary.MAX_LP_FEE, "never above 100%");
+        // Clamps just UNDER 100%: Pool.swap reverts exact-output swaps at a fee of exactly MAX_LP_FEE.
+        assertEq(FeeCurve.computeFee(q, 900_000, 3e18, ONE), LPFeeLibrary.MAX_LP_FEE - 1, "never reaches 100%");
     }
 
     function test_edge_stalenessMaxBelowOne_isMisconfig() public view {

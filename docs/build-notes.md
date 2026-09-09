@@ -171,3 +171,61 @@ that *differed* from the current one — skipping heartbeat re-prints — and, r
 the last print at or before the close, so a reopen followed by a retrace print does not read as
 "no move". Documented on the struct; enforced in `ChainlinkEquityAdapter`.
 
+
+## B7 — Round 3 audit of the hook: fixes and accepted risks
+
+**Baseline:** working tree after `89e7cd3` (hook + FeeCurve rounding/validate + hook tests).
+Four independent reviewers (math precision, integration, serial attacker, testing). Fixed, each
+with a regression test that fails without the fix; suite 106 → 118 tests.
+
+*Reopen arb was bypassable by a wei (High, fixed).* `referenceMoved` required the pool to sit
+**between** the two prints. A pool nudged one wei past the old print before Friday's close read as
+a pool-created gap on Sunday and the whole reopen move rode at the floor (probe: 800 instead of
+5060). The existing test only passed because the sqrt-price constant truncates one ulp *above*
+the previous print. New rule: the pool was tracking the old print if `|pool − prev| ≤ |ref − prev|`
+— the band plus its mirror on the far side of the old print. Residual: a trader can still escape by
+pre-paying a real gap larger than the overnight move, in the right direction, before knowing it
+(the attacker reviewer measured this at ~68 bps paid to save the surcharge on a ≤1% overshoot).
+
+*Live feed with an unusable price was priced as a healthy market (Medium, 2/4, fixed).*
+`isLive = true` with `price = 0`, or a quote feed at 0, gave the base floor and no deviation term.
+The cheap floors now require `isLive && ref != 0`; otherwise the closed floor applies.
+
+*`_price` read 0 at the buy-side price limit (Medium, fixed).* Inverting a truncated intermediate
+turned an extreme sqrtPrice into "−100%" instead of "+∞", making the fee non-monotone in trade
+size for gentle slopes. Each orientation is now computed directly; `_dev` saturates at `MAX_DEV`
+before multiplying; `sqrtP == 0` saturates rather than dividing by zero.
+
+*`feeCap == 100%` blocked exact-output swaps (Low, fixed).* v4 rejects exact-output swaps at a
+fee of exactly `MAX_LP_FEE`. `validate` now requires `feeCap < MAX_LP_FEE`; `computeFee` clamps
+to `MAX_LP_FEE − 1`.
+
+*Belt and braces (Low, fixed).* The adapter call sits behind `try/catch` (a reverting adapter
+degrades to the closed floor instead of blocking the pool). `_afterInitialize` refuses a starting
+price more than 10x from the reference — a wrong `stockIsToken1` or decimals would otherwise be
+immutable and charge the cap on every buy. The constructor rejects a static-fee key and a decimals
+gap above 18.
+
+**Accepted, documented, not fixed:**
+
+*Same-unlock JIT liquidity thins the post-swap estimate (Medium, 2/4).* Mint a one-spacing
+position over the current tick, swap, burn — all inside one `unlock`, deltas net to gas. The hook
+reads inflated in-range liquidity, estimates a small move, and under-prices an adverse swap that
+then exhausts the sliver. Measured: regular hours, pool at reference, 1000e18 buy: 2260 honest →
+1253 spoofed (≈37% of the surcharge shed) at `tickSpacing = 60`; the reopen defence is immune
+because `preDev` comes from real slot0, which JIT cannot move. No fix exists inside "the swap path
+writes nothing": the alternatives are a multi-tick Quoter-style walk in `beforeSwap` (gas) or
+pricing in `afterSwap` with a return delta (architecture change). Hackathon disposition: document;
+the floor component is unaffected; a wider `tickSpacing` tightens the bound.
+
+*Swap splitting (F2, known since B5, now quantified).* Charging `max(|pre|, |post|)` per leg is
+superadditive: the reopen arb split into 10 legs pays 3105 average vs 5060 in one (−39%). A
+path-integral charge is the fix and remains deferred.
+
+*Displace-then-restore asymmetry (Low).* An attacker who pushes the pool away from the reference
+pays the full surcharge (211 bps on a 10% push) and can unwind at the floor; a victim swapping
+in between pays 19x. The displacer loses far more than the victim, and the victim's fee goes to
+LPs. Noted as an MEV-sandwich amplifier, not a standalone profit.
+
+*Never read by the hook:* `MarketState.session` and `updatedAt`. The session comes from
+`MarketHours`; `updatedAt` is dead by B1. Both stay in the struct for adapters and tooling.

@@ -5,6 +5,7 @@ library Constants {
     // ── fixed point ─────────────────────────────────────────────────────────
     uint256 internal constant ONE = 1e18; // 1.0 for multipliers and deviations
     uint256 internal constant MAX_DEV = 1e20; // 10,000% — deviation is capped here so the fee math can never overflow
+    uint256 internal constant Q96 = 1 << 96; // Uniswap's fixed-point base for sqrtPriceX96
 
     // ── NYSE calendar, New York time, as seconds since midnight ─────────────
     uint256 internal constant EDT_OFFSET = 4 hours; // New York behind UTC in daylight time

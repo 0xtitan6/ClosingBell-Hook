@@ -6,6 +6,7 @@ import {IMarketStateAdapter, MarketState, Session} from "../../src/IMarketStateA
 /// @notice Canned oracle for hook tests. Set any MarketState, then swap.
 contract MockMarketStateAdapter is IMarketStateAdapter {
     MarketState internal state;
+    bool public reverting; // simulate a broken adapter (violates the interface contract)
 
     constructor() {
         // Sensible default: Regular hours, live, $100 reference, fresh print, dollar quote.
@@ -22,6 +23,7 @@ contract MockMarketStateAdapter is IMarketStateAdapter {
     }
 
     function getMarketState() external view returns (MarketState memory) {
+        if (reverting) revert("adapter down");
         return state;
     }
 
@@ -62,6 +64,10 @@ contract MockMarketStateAdapter is IMarketStateAdapter {
         state.hasQuoteFeed = has;
         state.quotePrice = quotePrice;
         state.prevQuotePrice = prevQuotePrice;
+    }
+
+    function setReverting(bool r) external {
+        reverting = r;
     }
 
     /// @notice Simulate a dead feed: price 0, not live.
