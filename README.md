@@ -200,46 +200,6 @@ Verification with line numbers, timestamps and licences: [`docs/prior-art-verifi
 
 Caveat: this is a survey of five named hooks on one date, not proof of absence — 489 distinct non-zero hook addresses are live on Robinhood Chain, most undocumented.
 
-## AI tools: what was generated, and what was directed
-
-Per ETHGlobal's AI attribution rule, stated file by file. **Claude Code (Claude Opus 5) wrote most
-of the Solidity in this repository.** It was used as an implementation and review tool against
-specifications and decisions made by the author.
-
-| | Written by | Specified / decided by |
-|---|---|---|
-| [`docs/proposal.md`](docs/proposal.md) | author (pre-window, revisions r1-r7, disclosed) | author |
-| [`src/IMarketStateAdapter.sol`](src/IMarketStateAdapter.sol) | author, with AI edits to field set and ordering | author |
-| [`src/FeeCurve.sol`](src/FeeCurve.sol) | mixed: author wrote the `Params` struct and the shape of `floorFor`; AI wrote the remaining bodies | author |
-| [`src/MarketHours.sol`](src/MarketHours.sol) | AI, from a written spec by the author | author |
-| [`src/ClosingBellHook.sol`](src/ClosingBellHook.sol) | AI | author |
-| [`src/ChainlinkEquityAdapter.sol`](src/ChainlinkEquityAdapter.sol) | AI, test-first against a spec reviewed by the author | author |
-| [`test/`](test/) (2,545 lines, 172 tests) | AI | author |
-| [`docs/architecture.md`](docs/architecture.md), [`docs/build-notes.md`](docs/build-notes.md) | AI, recording decisions the author made | author |
-| Prior-art analysis ([`docs/prior-art-fables.md`](docs/prior-art-fables.md), [`docs/prior-art-verification.md`](docs/prior-art-verification.md)) | AI research, author-directed | author |
-
-**The review process, which is where most of the engineering happened.** Five audit rounds were run
-using a human-in-the-loop audit protocol ([`.claude/skills/`](.claude/skills/), mandates recorded in
-[`docs/audit-rounds.md`](docs/audit-rounds.md)). Each round froze a baseline commit, fanned out
-independent AI reviewers with deliberately different adversarial mandates, and produced findings
-with reproducible traces. **The author adjudicated every finding** — severity, whether it was real,
-what to fix, and what to accept and document. The protocol explicitly forbids the loop closing its
-own findings, and it did not. Fixes were then AI-written, and each was mutated back out to confirm a
-test fails without it.
-
-That process found, among others: a reopen-arbitrage charge bypassable by moving the pool one wei
-(B7), a `try/catch` pattern that did not actually make the oracle call safe (B10), a
-reference-tracking rule that gave away the floor on any gap the pool had not tracked (B9), and an
-arithmetic overflow that would have bricked every swap in the pool (B13). Two of those were
-introduced by earlier AI-written fixes and caught by later rounds.
-
-**What was not AI-directed.** The mechanism is the author's: conditioning the fee on a trading
-calendar rather than volatility; the finding that Chainlink's `updatedAt` cannot detect a halt on
-these feeds, which killed the original staleness design (B1); driving the fee ramp from calendar
-time rather than feed age (B2); the floor ordering (B3); and the attribution rule that charges by
-*who created* a price gap, which is the sharpest difference from the surveyed prior art. Every one
-of those came out of author review that overruled an earlier design.
-
 ## Feedback to Uniswap
 
 See [`FEEDBACK.md`](FEEDBACK.md) `[TBD]`.
@@ -250,4 +210,4 @@ MIT. See [`LICENSE`](LICENSE).
 
 ## Author
 
-Neil Khedekar — [github.com/0xtitan6](https://github.com/0xtitan6)
+Neil K — [github.com/0xtitan6](https://github.com/0xtitan6)

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import {FeeCurve} from "../src/FeeCurve.sol";
 import {Session} from "../src/MarketHours.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
@@ -117,6 +118,26 @@ contract FeeCurveTest is Test {
         uint256 lc = 1_000_000;
         assertEq(FeeCurve.stalenessMult(P, Session.Closed, lc, lc + 72 hours), P.stalenessMax, "Labor Day 72h capped");
         assertEq(FeeCurve.stalenessMult(P, Session.Closed, lc, lc + 365 days), P.stalenessMax, "1y capped");
+    }
+
+    function test_stalenessMult_nowBeforeLastClose_doesNotRevert() public view {
+        // Nothing on the swap path may revert: a revert here fails beforeSwap and blocks the pool.
+        // The two timestamps are independent arguments, so the library owns the ordering, not the
+        // caller. Earlier-than-lastClose means no time has elapsed, so no staleness.
+        assertEq(FeeCurve.stalenessMult(P, Session.Closed, 1000, 999), ONE, "now one second early");
+        assertEq(FeeCurve.stalenessMult(P, Session.Closed, type(uint256).max, 0), ONE, "wildly early");
+        assertEq(FeeCurve.stalenessMult(P, Session.Closed, 1000, 1000), ONE, "exactly at the close");
+    }
+
+    function testFuzz_stalenessMult_eitherOrdering(uint256 lastClose, uint256 nowTs) public view {
+        // The bounds fuzz builds nowTs as lc + dt, so it never tests now < lastClose. This does.
+        // Both bounded to plausible timestamps: block.timestamp is what the hook passes in.
+        lastClose = bound(lastClose, 0, type(uint64).max);
+        nowTs = bound(nowTs, 0, type(uint64).max);
+        uint256 m = FeeCurve.stalenessMult(P, Session.Closed, lastClose, nowTs);
+        assertGe(m, ONE);
+        assertLe(m, P.stalenessMax);
+        if (nowTs <= lastClose) assertEq(m, ONE, "no elapsed time, no staleness");
     }
 
     function testFuzz_stalenessMult_bounds(uint256 lc, uint256 dt) public view {
@@ -287,7 +308,7 @@ contract FeeCurveTest is Test {
         if (!FeeCurve.isRestoring(pre, post, false)) return;
         // Restoring => same side (or landed exactly on ref) and strictly smaller |dev|.
         assertTrue(post == 0 || (pre > 0) == (post > 0), "same side of the reference");
-        assertLt(FeeCurve.abs(post), FeeCurve.abs(pre), "strictly shrinks");
+        assertLt(FixedPointMathLib.abs(post), FixedPointMathLib.abs(pre), "strictly shrinks");
     }
 
     // ── deviationMult ───────────────────────────────────────────────────────────
@@ -504,7 +525,7 @@ contract FeeCurveTest is Test {
         int256 pre = -291 * PCT / 100;
         bool restoring = FeeCurve.isRestoring(pre, 0, refMoved);
         assertFalse(restoring, "F1: not exempt");
-        uint256 d = FeeCurve.deviationMult(P, 0, FeeCurve.abs(pre), restoring); // charged on the gap taken
+        uint256 d = FeeCurve.deviationMult(P, 0, FixedPointMathLib.abs(pre), restoring); // charged on the gap taken
         uint24 fee = FeeCurve.computeFee(P, FeeCurve.floorFor(P, Session.Overnight, true), ONE, d);
         // TUNING FINDING (Sept 8): 800 x (1 + 0.5 + 2.41%*200) = 800 x 6.32 -> ~51 bps against a
         // 291 bps gap. Multiplicative-on-floor from an 8 bps floor needs slopes ~10x steeper, or a
@@ -518,7 +539,7 @@ contract FeeCurveTest is Test {
         // arbitrage is charged exactly the same. There is no clock to wait out.
         bool refMoved = FeeCurve.referenceMoved(100e18, 103e18, 100e18, 103e18);
         int256 pre = -291 * PCT / 100;
-        uint256 d = FeeCurve.deviationMult(P, 0, FeeCurve.abs(pre), FeeCurve.isRestoring(pre, 0, refMoved));
+        uint256 d = FeeCurve.deviationMult(P, 0, FixedPointMathLib.abs(pre), FeeCurve.isRestoring(pre, 0, refMoved));
         uint24 fee = FeeCurve.computeFee(P, FeeCurve.floorFor(P, Session.Overnight, true), ONE, d);
         assertEq(fee, 5056, "identical to t=0: no decay");
     }
@@ -538,7 +559,7 @@ contract FeeCurveTest is Test {
             bool restoring = FeeCurve.isRestoring(pre, post, moved);
             assertFalse(restoring);
             uint24 fee = FeeCurve.computeFee(
-                P, floorFee, ONE, FeeCurve.deviationMult(P, FeeCurve.abs(pre), FeeCurve.abs(post), restoring)
+                P, floorFee, ONE, FeeCurve.deviationMult(P, FixedPointMathLib.abs(pre), FixedPointMathLib.abs(post), restoring)
             );
             assertGt(fee, floorFee, "every leg above the floor");
             assertLt(fee, last, "surcharge falls as the gap closes");
@@ -553,12 +574,12 @@ contract FeeCurveTest is Test {
         // Splitting cannot beat the single swap by more than the endpoint rule's known leakage (B5).
         uint24 floorFee = FeeCurve.floorFor(P, Session.Overnight, true);
         int256 full = -291 * PCT / 100;
-        uint24 single = FeeCurve.computeFee(P, floorFee, ONE, FeeCurve.deviationMult(P, FeeCurve.abs(full), 0, false));
+        uint24 single = FeeCurve.computeFee(P, floorFee, ONE, FeeCurve.deviationMult(P, FixedPointMathLib.abs(full), 0, false));
         int256 half = full / 2;
         uint24 leg1 = FeeCurve.computeFee(
-            P, floorFee, ONE, FeeCurve.deviationMult(P, FeeCurve.abs(full), FeeCurve.abs(half), false)
+            P, floorFee, ONE, FeeCurve.deviationMult(P, FixedPointMathLib.abs(full), FixedPointMathLib.abs(half), false)
         );
-        uint24 leg2 = FeeCurve.computeFee(P, floorFee, ONE, FeeCurve.deviationMult(P, FeeCurve.abs(half), 0, false));
+        uint24 leg2 = FeeCurve.computeFee(P, floorFee, ONE, FeeCurve.deviationMult(P, FixedPointMathLib.abs(half), 0, false));
         // Each leg is charged on its own larger endpoint; the second leg is not exempt.
         assertEq(leg1, single, "first leg pays the full-gap rate");
         assertGt(leg2, floorFee, "second leg still charged");

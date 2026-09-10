@@ -1,25 +1,69 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {Session} from "./IMarketStateAdapter.sol";
+import {Session} from "./MarketHours.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
+import {Constants} from "./Constants.sol";
 
-/// @notice Pure fee math. Fees in pips (1e-6); multipliers and deviations in 1e18.
+/// @notice What a swap costs: a floor for the time of day, raised the longer the market has been
+///         shut, raised again the further the pool has drifted from the real price, then capped. All in basis points.
 library FeeCurve {
-    uint256 internal constant ONE = 1e18;
 
-    /// @notice Creator-set, immutable in the hook's constructor.
-    /// Invariant (enforced by the hook): baseFee <= elevatedFloor <= closedFloor <= feeCap <= MAX_LP_FEE
+    /// @notice The fee settings, chosen once by whoever launches the pool and fixed forever.
     struct Params {
-        uint24 baseFee;        // floor: Regular, live
-        uint24 elevatedFloor;  // floor: Extended / Overnight
-        uint24 closedFloor;    // floor: Closed, or any session with !isLive
-        uint24 feeCap;         // single cap on the full product
-        uint64 stalenessSlope; // 1e18 per second since lastClose
-        uint64 stalenessMax;   // cap on stalenessMult, 1e18
-        uint64 devKink;        // deviation (1e18) where f's slope changes
-        uint64 devSlope1;      // f slope below the kink, 1e18 per 1e18 of deviation
-        uint64 devSlope2;      // f slope above the kink
-        uint32 decayWindow;    // seconds after reopen over which the surcharge blends out
+        uint24 baseFee;                           // floor: regular hours, feed usable
+        uint24 elevatedFloor;                     // floor: pre-market, after-hours, overnight
+        uint24 closedFloor;                       // floor: weekends, holidays, or any session with an unusable feed
+        uint24 feeCap;                            // the most this pool will ever charge
+        uint64 stalenessSlope;                    // added to the staleness multiplier each second the market is shut
+        uint64 stalenessMax;                      // and how high that multiplier is allowed to climb
+        uint64 devKink;                           // the drift beyond which the surcharge gets steeper
+        uint64 devSlope1;                         // how hard drift is charged below the kink
+        uint64 devSlope2;                         // and above it
+    }
+
+    // @notice Each floor must be at least the one before it, and the cap must stay under 100%
+    function validate(Params memory p) internal pure returns (bool) {
+        return p.baseFee <= p.elevatedFloor && p.elevatedFloor <= p.closedFloor && p.closedFloor <= p.feeCap
+            && p.feeCap < LPFeeLibrary.MAX_LP_FEE && p.stalenessMax >= Constants.ONE;
+    }
+
+    // @notice The least this swap can cost. A feed we can't trust pays the closed-market rate.
+    function floorFor(Params memory p, Session s, bool isLive) internal pure returns (uint24) {
+        if (!isLive || s == Session.Closed) {
+            return p.closedFloor;
+        }
+        if (s == Session.Regular) {
+            return p.baseFee;
+        }
+        return p.elevatedFloor;     
+    }
+    
+    // @notice Staleness of a market the longer nobody has seen a real price
+    function stalenessMult(Params memory p, Session s, uint256 lastClose, uint256 nowTs) internal pure returns (uint256) {
+        if (s != Session.Closed || nowTs <= lastClose) {
+            return Constants.ONE;
+        }
+        uint256 mulVal = Constants.ONE + (nowTs - lastClose) * p.stalenessSlope;
+
+        if (mulVal > p.stalenessMax) return p.stalenessMax;
+        return mulVal;
+    }
+
+    function computeFee(Params memory p, uint24 floorFee, uint256 stalenessM, uint256 deviationM) internal pure returns (uint24) {
+        
+    }
+    
+    function referenceMoved(uint256 poolPrice, uint256 ref, uint256 lo, uint256 hi) internal pure returns (bool) {
+
+    }
+    
+    function isRestoring(int256 preDev, int256 postDev, bool refMoved) internal pure returns (bool) {
+
+    }
+    
+    function deviationMult(Params memory p, uint256 absPreDev, uint256 absPostDev, bool restoring) internal pure returns (uint256) {
+
     }
 }
