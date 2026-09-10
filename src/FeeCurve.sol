@@ -5,6 +5,8 @@ import {Session} from "./MarketHours.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 import {LPFeeLibrary} from "@uniswap/v4-core/src/libraries/LPFeeLibrary.sol";
 import {Constants} from "./Constants.sol";
+import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
+
 
 /// @notice What a swap costs: a floor for the time of day, raised the longer the market has been
 ///         shut, raised again the further the pool has drifted from the real price, then capped. All in basis points.
@@ -71,12 +73,16 @@ library FeeCurve {
         }
         return uint24(fee);
     }
-    
-    function referenceMoved(uint256 poolPrice, uint256 ref, uint256 lo, uint256 hi) internal pure returns (bool) {
 
+    // @notice Cheap rate only if the pool drifted on its own and this swap pushes it back.
+    function isRestoring(int256 preDev, int256 postDev, bool refMoved) internal pure returns (bool) {
+        if (refMoved) return false;
+        if (postDev == 0) return preDev != 0;
+        if ((preDev > 0) != (postDev > 0)) return false;
+        return FixedPointMathLib.abs(postDev) < FixedPointMathLib.abs(preDev);
     }
     
-    function isRestoring(int256 preDev, int256 postDev, bool refMoved) internal pure returns (bool) {
+    function referenceMoved(uint256 poolPrice, uint256 ref, uint256 lo, uint256 hi) internal pure returns (bool) {
 
     }
     
