@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-contract ChainlinkEquityAdapter {}
+import {IMarketStateAdapter} from "./IMarketStateAdapter.sol";
+
+contract ChainlinkEquityAdapter is IMarketStateAdapter {
+
+}

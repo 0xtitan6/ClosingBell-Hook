@@ -25,13 +25,13 @@ library FeeCurve {
         uint64 devSlope2;                         // and above it
     }
 
-    // @notice Each floor must be at least the one before it, and the cap must stay under 100%
+    /// @notice Each floor must be at least the one before it, and the cap must stay under 100%
     function validate(Params memory p) internal pure returns (bool) {
         return p.baseFee <= p.elevatedFloor && p.elevatedFloor <= p.closedFloor && p.closedFloor <= p.feeCap
             && p.feeCap < LPFeeLibrary.MAX_LP_FEE && p.stalenessMax >= Constants.ONE;
     }
 
-    // @notice The least this swap can cost. A feed we can't trust pays the closed-market rate.
+    /// @notice The least this swap can cost. A feed we can't trust pays the closed-market rate.
     function floorFor(Params memory p, Session s, bool isLive) internal pure returns (uint24) {
         if (!isLive || s == Session.Closed) {
             return p.closedFloor;
@@ -42,7 +42,7 @@ library FeeCurve {
         return p.elevatedFloor;     
     }
     
-    // @notice Staleness of a market the longer nobody has seen a real price
+    /// @notice Staleness of a market the longer nobody has seen a real price
     function stalenessMult(Params memory p, Session s, uint256 lastClose, uint256 nowTs) internal pure returns (uint256) {
         if (s != Session.Closed || nowTs <= lastClose) {
             return Constants.ONE;
@@ -53,7 +53,7 @@ library FeeCurve {
         return mulVal;
     }
 
-    // @notice The final fee sent to Uniswap 
+    /// @notice The final fee sent to Uniswap 
     function computeFee(Params memory p, uint24 floorFee, uint256 stalenessM, uint256 deviationM) internal pure returns (uint24) {
         uint256 num = uint256(floorFee) * stalenessM;
         uint256 denom = Constants.ONE * Constants.ONE;
@@ -74,7 +74,7 @@ library FeeCurve {
         return uint24(fee);
     }
 
-    // @notice Cheap rate only if the pool drifted on its own and this swap pushes it back.
+    /// @notice Cheap rate only if the pool drifted on its own and this swap pushes it back.
     function isRestoring(int256 preDev, int256 postDev, bool refMoved) internal pure returns (bool) {
         if (refMoved) return false;
 
@@ -85,7 +85,7 @@ library FeeCurve {
         return FixedPointMathLib.abs(postDev) < FixedPointMathLib.abs(preDev);
     }
     
-    // @notice How much the drift multiplies the fee. Helpful swaps pay nothing extra.
+    /// @notice How much the drift multiplies the fee. Helpful swaps pay nothing extra.
     function deviationMult(Params memory p, uint256 absPreDev, uint256 absPostDev, bool restoring) internal pure returns (uint256) {
         if (restoring) return Constants.ONE;
 
@@ -101,7 +101,7 @@ library FeeCurve {
         return Constants.ONE + uint256(p.devKink) * p.devSlope1 + (dev - p.devKink) * p.devSlope2;
     }
 
-    // @notice Stock move out from under a pool it was tracking or a pool drift occured
+    /// @notice Stock move out from under a pool it was tracking or a pool drift occured
     function referenceMoved(uint256 poolPrice, uint256 ref, uint256 lo, uint256 hi) internal pure returns (bool) {
         if (lo == 0 || hi == 0 || lo > hi) return true;
 
