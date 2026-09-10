@@ -51,8 +51,25 @@ library FeeCurve {
         return mulVal;
     }
 
+    // @notice The final fee sent to Uniswap 
     function computeFee(Params memory p, uint24 floorFee, uint256 stalenessM, uint256 deviationM) internal pure returns (uint24) {
+        uint256 num = uint256(floorFee) * stalenessM;
+        uint256 denom = Constants.ONE * Constants.ONE;
+        uint256 fee = FullMath.mulDiv(num, deviationM, denom);
+
+        if (mulmod(num, deviationM, denom) * 2 >= denom) fee += 1;
         
+        uint256 cap;
+        if (p.feeCap < LPFeeLibrary.MAX_LP_FEE) {
+            cap = p.feeCap;          
+        } else {
+            cap = LPFeeLibrary.MAX_LP_FEE - 1;  
+        }
+
+        if (fee > cap) {
+            return uint24(cap);
+        }
+        return uint24(fee);
     }
     
     function referenceMoved(uint256 poolPrice, uint256 ref, uint256 lo, uint256 hi) internal pure returns (bool) {
