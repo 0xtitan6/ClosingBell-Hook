@@ -77,16 +77,45 @@ library FeeCurve {
     // @notice Cheap rate only if the pool drifted on its own and this swap pushes it back.
     function isRestoring(int256 preDev, int256 postDev, bool refMoved) internal pure returns (bool) {
         if (refMoved) return false;
+
         if (postDev == 0) return preDev != 0;
+
         if ((preDev > 0) != (postDev > 0)) return false;
+
         return FixedPointMathLib.abs(postDev) < FixedPointMathLib.abs(preDev);
     }
     
-    function referenceMoved(uint256 poolPrice, uint256 ref, uint256 lo, uint256 hi) internal pure returns (bool) {
-
-    }
-    
+    // @notice How much the drift multiplies the fee. Helpful swaps pay nothing extra.
     function deviationMult(Params memory p, uint256 absPreDev, uint256 absPostDev, bool restoring) internal pure returns (uint256) {
+        if (restoring) return Constants.ONE;
 
+        uint256 dev = absPreDev > absPostDev ? absPreDev : absPostDev;
+        if (dev == 0) return Constants.ONE;
+
+        if (dev > Constants.MAX_DEV) dev = Constants.MAX_DEV;
+
+        if (dev <= p.devKink) {
+            return Constants.ONE + dev * p.devSlope1;
+        }
+
+        return Constants.ONE + uint256(p.devKink) * p.devSlope1 + (dev - p.devKink) * p.devSlope2;
+    }
+
+    // @notice Stock move out from under a pool it was tracking or a pool drift occured
+    function referenceMoved(uint256 poolPrice, uint256 ref, uint256 lo, uint256 hi) internal pure returns (bool) {
+        if (lo == 0 || hi == 0 || lo > hi) return true;
+
+        if (lo == hi && lo == ref) return false;
+    
+        uint256 low = lo < ref ? lo : ref;
+        uint256 high = hi > ref ? hi : ref;
+
+        uint256 refAboveLow = ref - low;
+        uint256 refBelowHigh = high - ref;
+
+        uint256 lower = refAboveLow >= low ? 0 : low - refAboveLow;
+        uint256 upper = refBelowHigh > type(uint256).max - high ? type(uint256).max : high + refBelowHigh;
+
+        return poolPrice >= lower && poolPrice <= upper;
     }
 }
