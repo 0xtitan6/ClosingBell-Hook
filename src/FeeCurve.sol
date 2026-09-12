@@ -26,9 +26,13 @@ library FeeCurve {
     }
 
     /// @notice Each floor must be at least the one before it, and the cap must stay under 100%
+    // v4 takes any protocol fee first, charges the LP fee on the rest, and rounds up to a whole pip.
+    // An LP fee of 999_999 can round to 100%, which blocks exact-output swaps; 999_998 never does.
+    uint24 internal constant MAX_CAP = LPFeeLibrary.MAX_LP_FEE - 2;
+
     function validate(Params memory p) internal pure returns (bool) {
         return p.baseFee <= p.elevatedFloor && p.elevatedFloor <= p.closedFloor && p.closedFloor <= p.feeCap
-            && p.feeCap < LPFeeLibrary.MAX_LP_FEE && p.stalenessMax >= Constants.ONE;
+            && p.feeCap <= MAX_CAP && p.stalenessMax >= Constants.ONE;
     }
 
     /// @notice The least this swap can cost. A feed we can't trust pays the closed-market rate.
@@ -61,12 +65,7 @@ library FeeCurve {
 
         if (mulmod(num, deviationM, denom) * 2 >= denom) fee += 1;
         
-        uint256 cap;
-        if (p.feeCap < LPFeeLibrary.MAX_LP_FEE) {
-            cap = p.feeCap;          
-        } else {
-            cap = LPFeeLibrary.MAX_LP_FEE - 1;  
-        }
+        uint256 cap = p.feeCap < MAX_CAP ? p.feeCap : MAX_CAP;
 
         if (fee > cap) {
             return uint24(cap);

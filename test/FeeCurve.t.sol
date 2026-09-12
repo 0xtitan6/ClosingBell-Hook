@@ -71,7 +71,10 @@ contract FeeCurveTest is Test {
         assertTrue(FeeCurve.validate(q), "zero base is allowed");
         q = P;
         q.feeCap = LPFeeLibrary.MAX_LP_FEE - 1;
-        assertTrue(FeeCurve.validate(q), "cap just under 100% is allowed");
+        assertFalse(FeeCurve.validate(q), "999_999 compounds to 100% once a protocol fee is on");
+        q = P;
+        q.feeCap = LPFeeLibrary.MAX_LP_FEE - 2;
+        assertTrue(FeeCurve.validate(q), "999_998 is the highest safe cap");
     }
 
     // ── floorFor ────────────────────────────────────────────────────────────────
@@ -411,7 +414,7 @@ contract FeeCurveTest is Test {
         s = bound(s, ONE, 100e18);
         d = bound(d, ONE, 100e18);
         uint24 fee = FeeCurve.computeFee(q, floorFee, s, d);
-        assertLe(fee, LPFeeLibrary.MAX_LP_FEE, "fee <= MAX_LP_FEE even when feeCap is misconfigured");
+        assertLe(fee, LPFeeLibrary.MAX_LP_FEE - 2, "fee <= MAX_LP_FEE - 2 even when feeCap is misconfigured");
         assertLe(fee, q.feeCap, "fee <= feeCap");
         assertTrue(fee & LPFeeLibrary.OVERRIDE_FEE_FLAG == 0, "flag bit never set by the curve");
     }
@@ -482,8 +485,9 @@ contract FeeCurveTest is Test {
     function test_edge_capAboveMaxLPFee_clamped() public view {
         FeeCurve.Params memory q = P;
         q.feeCap = type(uint24).max; // 16_777_215 > MAX_LP_FEE: a one-digit slip in config
-        // Clamps just UNDER 100%: Pool.swap reverts exact-output swaps at a fee of exactly MAX_LP_FEE.
-        assertEq(FeeCurve.computeFee(q, 900_000, 3e18, ONE), LPFeeLibrary.MAX_LP_FEE - 1, "never reaches 100%");
+        // Clamps two pips UNDER 100%: v4 compounds the LP fee with any protocol fee and rounds up, so
+        // 999_999 can become exactly MAX_LP_FEE, which reverts exact-output swaps.
+        assertEq(FeeCurve.computeFee(q, 900_000, 3e18, ONE), LPFeeLibrary.MAX_LP_FEE - 2, "never reaches 100%");
     }
 
     function test_edge_stalenessMaxBelowOne_isMisconfig() public view {

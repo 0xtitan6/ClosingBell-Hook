@@ -4,7 +4,7 @@
 
 Built for [ETHOnline 2026](https://ethglobal.com/events/ethonline2026) (build window opens Sept 4; submission deadline Sept 13, 12:00 pm EDT). Uniswap Foundation track: Best Uniswap Stack Contribution. Uses Chainlink Data Feeds.
 
-> Status: **in progress**. Pre-window work, disclosed to ETHGlobal: this README, the design doc (`docs/proposal.md`), and the Uniswap v4-template boilerplate scaffold. All project code is written from the Sept 4 kickoff. Sections marked `[TBD]` are filled in as results land.
+> Status: **contracts complete, 174 unit tests + 6 fork tests passing** (Sept 12). Pre-window work, disclosed to ETHGlobal: this README, the design doc (`docs/proposal.md`), and the Uniswap v4-template boilerplate scaffold. All project code is written from the Sept 4 kickoff. Not deployed to mainnet; the fork tests run against the live chain. Sections marked `[TBD]` are open. AI usage is documented per file in [How AI was used](#how-ai-was-used).
 
 ---
 
@@ -83,7 +83,7 @@ For the fee to matter against documented 3–5% weekend gaps, `feeCap` has to be
 
 ### Parameters (creator-set at initialization, immutable)
 
-The hook's users are pool creators — issuers, professional LPs, Robinhood itself. Parameters are `immutable`, set in the constructor: one hook instance per pool. **v4 fees are pips (1e-6), not bps** — `MAX_LP_FEE` is 1_000_000, and an over-cap fee reverts rather than clamps. Tuned defaults land after the fork tests.
+The hook's users are pool creators — issuers, professional LPs, Robinhood itself. Parameters are `immutable`, set in the constructor: one hook instance per pool. **v4 fees are pips (1e-6), not bps** — `MAX_LP_FEE` is 1_000_000, and an over-cap fee reverts rather than clamps. The defaults below are the values the end-to-end and fork tests use; they were not tuned against measured data.
 
 | Parameter | What it controls | v1 default |
 |---|---|---|
@@ -91,8 +91,8 @@ The hook's users are pool creators — issuers, professional LPs, Robinhood itse
 | `elevatedFloor` | Floor for pre/post/overnight sessions — reference is still live here, so this sits near `baseFee` (B3) | 800 pips = 8 bps *(provisional)* |
 | `closedFloor` | Floor when calendar-closed, or the feed is unusable | 3_000 pips = 30 bps *(provisional)* |
 | staleness curve | `stalenessMult` vs time since **session close**, capped (B2) | slope `1.0684e13`/sec, cap 3.0x *(provisional)* |
-| deviation curve | Piecewise-linear knots for `f(\|dev\|)` | `[TBD: tuned]` |
-| `feeCap` | Single cap on the full product; must be **below** 100% or v4 rejects exact-output swaps | 40_000 pips = 400 bps *(provisional)* |
+| deviation curve | `devKink`, `devSlope1`, `devSlope2`: multiplier grows with \|dev\| at `slope1` up to the kink, `slope2` past it | kink 0.5%, slopes 100 / 200 *(provisional)* |
+| `feeCap` | Single cap on the full product; at most `MAX_LP_FEE − 2` or v4 can compound it to 100% and reject exact-output swaps | 40_000 pips = 400 bps *(provisional)* |
 | `quoteFeed` | Optional second feed for non-dollar quote legs (stock/SPY) | `address(0)` for stock/USDG |
 | `maxStaleness`, plausibility bound | Liveness-predicate thresholds. `maxStaleness` **above** the 86400s heartbeat — dead-feed net, not halt detector (B1) | 2 days, 2000 bps *(provisional)* |
 
@@ -114,15 +114,19 @@ Nobody has published a pool-level weekend/reopen analysis or LVR measurement for
 
 Pipeline: `scripts/spread-analysis/` (Envio HyperSync → `Swap` logs → `sqrtPriceX96` decode → decimals + multiplier normalization).
 
-## Results `[TBD]`
+## Results from the fork
 
-Fork test on Robinhood Chain: pool at Friday close, reference jumps at the open, **one optimally sized arbitrage swap** with and without the hook.
+[`test/fork/Hook.fork.t.sol`](test/fork/Hook.fork.t.sol) runs the hook on a fork of Robinhood Chain against the **real PoolManager, the real AAPL and USDG tokens, and the real Chainlink AAPL/USD and USDG/USD feeds**. Friday Sept 11 2026, 20:59 ET, one hour after the 24/5 feed's weekly close, pool opened at the live reference of 332.53 USDG per AAPL:
 
-- `[TBD]` LP value retained, hook vs unprotected
-- `[TBD]` Fee revenue captured from the arb
-- `[TBD]` Decomposition: how much protection came from `floor × staleness` vs the deviation surcharge
+| swap | fee (pips) | fee |
+|---|---|---|
+| buy 100 USDG of AAPL | 3149 | 0.31% |
+| buy 100k USDG of AAPL (thin fork pool) | 40000 | 4.00%, the cap |
+| sell 1 AAPL | 3229 | 0.32% |
+| 24 hours later, feed still dark | 5949 | 0.59% |
+| a real 1,000 USDG swap through the PoolManager | quoted 3459, **charged 3459** | 0.35% |
 
-If most of v1's protection turns out to be floor × staleness, that is the finding, and it is reported as such.
+During regular hours the same pool quotes 500 (0.05%). The closed floor, the staleness ramp and the size-aware deviation term are all visible in one run. What is **not** measured: LP value retained vs an unhooked pool over a real reopen. That experiment was scoped and not run; see `docs/proposal.md` §8.
 
 ## Architecture
 
@@ -149,25 +153,29 @@ If most of v1's protection turns out to be floor × staleness, that is the findi
 
 | File | What it is |
 |---|---|
-| [`src/ClosingBellHook.sol`](src/ClosingBellHook.sol) | The hook, `is BaseOverrideFee`. Permissions `afterInitialize + beforeSwap` (salt `0x1080`); implements `_getFee` only. Constructor-immutable params, one instance per pool; `_afterInitialize` rejects any other pool. `[TBD: line pointers]` |
+| [`src/ClosingBellHook.sol`](src/ClosingBellHook.sol) | The hook, `is BaseOverrideFee`. Permissions `afterInitialize + beforeSwap` (address flags `0x1080`); implements `_getFee` only. Constructor-immutable params, one instance per pool; `_afterInitialize` rejects any other pool and a start price >10x off the reference. ~200 lines |
 | [`src/FeeCurve.sol`](src/FeeCurve.sol) | Pure library: floors, staleness and deviation multipliers, the signed direction rule, the reference window, cap |
 | [`src/MarketHours.sol`](src/MarketHours.sol) | Pure library: UTC→ET with DST, session windows, NYSE holidays as **rules** (no table, nothing to expire) |
 | [`src/IMarketStateAdapter.sol`](src/IMarketStateAdapter.sol) | The oracle seam: one `view` call returning prices and their recent window. Must never revert |
 | [`src/ChainlinkEquityAdapter.sol`](src/ChainlinkEquityAdapter.sol) | v1 adapter: Data Feed price and round history, optional quote feed, `oraclePaused()`, liveness predicate |
 | [`src/Constants.sol`](src/Constants.sol) | Fixed-point units, NYSE clock times, feed-history lookback. Verified chain addresses live in [`docs/verified-onchain.md`](docs/verified-onchain.md) — the PoolManager is **non-canonical** here |
 
-**Uniswap v4 integration points** `[TBD: exact lines]`: hook permissions (`beforeSwap`), dynamic-fee flag on pool init, fee override return in `beforeSwap`, `StateLibrary` reads for the post-swap estimate.
+**Uniswap v4 integration points:** permissions and the `OVERRIDE_FEE_FLAG` return come from OpenZeppelin's [`BaseOverrideFee`](lib/uniswap-hooks/src/fee/BaseOverrideFee.sol); the dynamic-fee check is [`ClosingBellHook.sol:50`](src/ClosingBellHook.sol#L50); the fee itself is [`_getFee`](src/ClosingBellHook.sol#L102); pool state for the post-swap estimate is read with `StateLibrary` at [`_poolPrices`](src/ClosingBellHook.sol#L165); the estimate uses v4's own `SqrtPriceMath`.
 
 ## Running it
 
 ```bash
 forge install
-forge test                                                            # unit + local integration
-forge test --fork-url https://rpc.mainnet.chain.robinhood.com -vv     # fork tests (Robinhood Chain, ID 4663)
-./script/day1-checks.sh                                               # feed + multiplier sanity checks via cast
+forge test                                   # 174 unit + integration tests; fork tests self-skip
+forge test --fuzz-runs 10000                 # what the audit rounds ran
+
+# Against the live chain (Robinhood Chain, ID 4663): real feeds, real PoolManager, real tokens
+RPC=https://rpc.mainnet.chain.robinhood.com
+forge test --match-path test/fork/Adapter.fork.t.sol --fork-url $RPC -vv
+forge test --match-path test/fork/Hook.fork.t.sol    --fork-url $RPC -vv
 ```
 
-Test names are fixed by the spec; see [`test/`](test/). Tests route swaps through the PoolManager / v4 test router only — the UniversalRouter on Robinhood Chain is a modified fork.
+Tests route swaps through the PoolManager and v4's test routers only — the UniversalRouter on Robinhood Chain is a modified fork.
 
 ## Scope
 
@@ -179,7 +187,7 @@ Dynamic-fee hooks need Uniswap Labs routing allowlisting before the official app
 
 ## Novelty, stated carefully
 
-Five hooks surveyed as of **Sept 4 2026**, all verified directly from source or on-chain bytecode. Two of them defeat claims this project originally made, and saying so first is the point.
+Five hooks surveyed as of **Sept 4 2026**, all verified directly from source or on-chain bytecode, plus Uniswap Labs' StablePair hook published Sept 10, mid-build. Two of them defeat claims this project originally made, and saying so first is the point.
 
 | | Calendar | Reads a reference price | What it does with `updatedAt` |
 |---|---|---|---|
@@ -188,6 +196,7 @@ Five hooks surveyed as of **Sept 4 2026**, all verified directly from source or 
 | StockShield (`ayush18pop/stockshield.eth`) | yes, 7 regimes | yes | **reverts** (60s) |
 | FLock (`FLock-io/flock-v4-hook`) | yes | **no** | nothing |
 | Levery | no | yes | not conditioned |
+| [StablePair](https://blog.uniswap.org/stablepair-hook-a-fee-that-moves-with-the-market) (Uniswap Labs, Sept 10 2026) | no | configured constant, not an oracle | n/a |
 | **ClosingBell** | yes, 4 sessions | yes, every swap | **prices it** |
 
 **What is not novel, stated plainly.** Calendar-conditioned fees for tokenized stocks are occupied — Fables ships them live on this chain with real TVL, and analysis with addresses and quoted source is in [`docs/prior-art-fables.md`](docs/prior-art-fables.md). Direction asymmetry against an oracle reference is occupied *and taught* — Ballast implements it and credits Uniswap Hook Incubator's "Nezlobin's Directional Fee." Neither is claimed here.
@@ -196,6 +205,8 @@ Five hooks surveyed as of **Sept 4 2026**, all verified directly from source or 
 
 **Two honest notes.** Fables does *not* believe the closure is harmless — their `closedSpike` docstring says the post-weekend open is *"the most toxic — a whole weekend of off-venue price discovery the pool is blind to,"* and their source states *"No ordering is imposed on the three floors."* The disagreement is about where weekend toxicity is charged, not whether it exists. And FLock's hook was created 2026-09-04 09:24 UTC — concurrent independent work, not prior art; nobody could have read it beforehand.
 
+**StablePair** (Uniswap Labs, MIT, OZ-audited) is the closest in mechanism and the most instructive contrast. It holds a pool near a *configured* reference with a fee that decays block by block, and its direction rule is the reverse of ClosingBell's: a swap pushing the price *away* from the reference pays **zero**, because for a stablecoin pair the trader is already taking a worse-than-par price. For a stock whose reference has been dark for two days, the stale price is the *pool's*, not the trader's, so ClosingBell charges the adverse direction the most. One detail was adopted from it: the fee cap is `MAX_LP_FEE − 2`, since v4 compounds the LP fee with any protocol fee and rounds up ([`FeeCurve.sol:31`](src/FeeCurve.sol#L31)).
+
 Verification with line numbers, timestamps and licences: [`docs/prior-art-verification.md`](docs/prior-art-verification.md). Ballast and StockShield carry no licence file; nothing was copied from any of them.
 
 Caveat: this is a survey of five named hooks on one date, not proof of absence — 489 distinct non-zero hook addresses are live on Robinhood Chain, most undocumented.
@@ -203,6 +214,28 @@ Caveat: this is a survey of five named hooks on one date, not proof of absence �
 ## Feedback to Uniswap
 
 See [`FEEDBACK.md`](FEEDBACK.md) `[TBD]`.
+
+## How AI was used
+
+Per ETHGlobal's rules. Claude (Anthropic, via Claude Code) was used throughout; this is what it wrote, what it did not, and how to check.
+
+**Process.** Design, architecture and the prior-art survey were written by the author before the build window (`docs/proposal.md`, `docs/architecture.md`). During the build, Claude drafted contracts and tests from the spec, then ran five adversarial audit rounds with independent reviewer prompts (findings and fixes in `docs/build-notes.md` B7–B13, one fix per commit up to `a0d219f`). On Sept 11 the author reset the four core contracts (`cafa0a8`) and rebuilt them by hand against the existing test suite, asking Claude for explanations, reviews and specific arithmetic-heavy functions. The git log is the record: commits from `cafa0a8` onward are the rebuild.
+
+| File | Author | Claude | Notes |
+|---|---|---|---|
+| `src/ClosingBellHook.sol` | imports, immutables, errors, constructor and its guards, `_decimals`, `quoteFee`, `_getFee`, `_fee`, `_market`, `_afterInitialize` pool check | `_references`, `_ratio`, `_price`, `_dev`, `_deviationMult`, `_poolPrices`, `_estimatePostSqrtPrice`, `stepSqrtPrice`, the 10x `PriceMismatch` check, one-line comments | Claude's functions wrap `FullMath`, `SqrtPriceMath` and `StateLibrary`; written on request, verified by 41 hook tests |
+| `src/FeeCurve.sol` | `Params`, `validate`, `floorFor`, `stalenessMult`, `isRestoring`, `MAX_CAP` | `computeFee`, `deviationMult`, `referenceMoved` (supplied on request, then cleaned up by the author) | |
+| `src/ChainlinkEquityAdapter.sol` | reviewed, not written | all of it | Delegated: stateless feed reading, decode and range checks. Spec is the header of its test file |
+| `src/AggregatorV3Interface.sol` | copied from Chainlink's MIT interface, trimmed | — | |
+| `src/IMarketStateAdapter.sol` | author | comments reviewed | |
+| `src/MarketHours.sol` | — | all of it | Calendar library, pre-reset; kept as-is with its 36 tests |
+| `src/Constants.sol` | author | — | |
+| `test/**` | — | all of it | 174 unit tests + 6 fork tests; the suite is the spec the rebuild was validated against |
+| `docs/build-notes.md` | — | all of it | Audit-round write-ups, reviewed by the author |
+| `docs/proposal.md`, `docs/architecture.md`, `docs/prior-art-*.md`, this README | author | edits and the sections added after the rebuild | |
+| `script/` | v4-template boilerplate | — | |
+
+Prompts were conversational, not spec files; the specs Claude worked from are the docs above and the test headers. No AI-generated video, voiceover or images.
 
 ## License
 
