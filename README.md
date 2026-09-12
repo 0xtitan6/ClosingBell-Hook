@@ -185,6 +185,8 @@ Tests route swaps through the PoolManager and v4's test routers only — the Uni
 
 Dynamic-fee hooks need Uniswap Labs routing allowlisting before the official app routes through them. Nothing here depends on that; the hook is usable by any pool creator and any integrator routing through the PoolManager.
 
+**Upgrade path.** v1 is immutable by design: no admin, no proxy, one hook per pool. A wrong parameter means a new hook and a new pool, which is how most v4 hooks work today. A production v2 would follow StablePair's pattern (ERC1967 proxy, roles, per-pool config); the fee path is already isolated for that — `_fee` is a pure function of `Params` and the adapter, so moving `Params` from immutable to role-gated storage is a wiring change, not a redesign. Two seams already exist without touching the hook: `IMarketStateAdapter` (Chainlink Data Streams with `marketStatus` drops in as a new adapter) and `MarketHours` (another exchange's calendar is a new library with the same `Session` enum).
+
 ## Novelty, stated carefully
 
 Five hooks surveyed as of **Sept 4 2026**, all verified directly from source or on-chain bytecode, plus Uniswap Labs' StablePair hook published Sept 10, mid-build. Two of them defeat claims this project originally made, and saying so first is the point.
