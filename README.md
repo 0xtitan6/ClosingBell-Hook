@@ -4,7 +4,7 @@
 
 Built for [ETHOnline 2026](https://ethglobal.com/events/ethonline2026) (build window opens Sept 4; submission deadline Sept 13, 12:00 pm EDT). Uniswap Foundation track: Best Uniswap Stack Contribution. Uses Chainlink Data Feeds.
 
-> Status: **contracts complete, 174 unit tests + 6 fork tests passing** (Sept 12). Pre-window work, disclosed to ETHGlobal: this README, the design doc (`docs/proposal.md`), and the Uniswap v4-template boilerplate scaffold. All project code is written from the Sept 4 kickoff. Not deployed to mainnet; the fork tests run against the live chain. Sections marked `[TBD]` are open. AI usage is documented per file in [How AI was used](#how-ai-was-used).
+> Status: **contracts complete, 174 unit tests + 7 fork tests passing** (Sept 12). Pre-window work, disclosed to ETHGlobal: this README, the design doc (`docs/proposal.md`), and the Uniswap v4-template boilerplate scaffold. All project code is written from the Sept 4 kickoff. Not deployed to mainnet; the fork tests run against the live chain. Sections marked `[TBD]` are open. AI usage is documented per file in [How AI was used](#how-ai-was-used).
 
 ---
 
@@ -177,6 +177,14 @@ forge test --match-path test/fork/Hook.fork.t.sol    --fork-url $RPC -vv
 
 Tests route swaps through the PoolManager and v4's test routers only — the UniversalRouter on Robinhood Chain is a modified fork.
 
+**Local demo** — a fork of Robinhood Chain taken on Sunday of Labor Day weekend 2026, with the real Chainlink AAPL/USD rounds replayed against the chain clock, and a page to quote, swap, and time-travel:
+
+```bash
+demo/run.sh          # anvil fork + deploy + http://127.0.0.1:8080/demo/
+```
+
+[`test/fork/Replay.fork.t.sol`](test/fork/Replay.fork.t.sol) asserts the same timeline: 0.81% Sunday, 1.00% Monday night before the feed woke, 0.14% for the arbitrage into the real −0.6% gap when it did, 0.05% once the pool tracks. See [`demo/`](demo/).
+
 ## Scope
 
 **In:** the hook, the adapter, the calendar library, unit + fork tests, one measured weekend for two pools, this README, `FEEDBACK.md`.
@@ -215,7 +223,7 @@ Caveat: this is a survey of five named hooks on one date, not proof of absence �
 
 ## Feedback to Uniswap
 
-See [`FEEDBACK.md`](FEEDBACK.md) `[TBD]`.
+See [`FEEDBACK.md`](FEEDBACK.md): what worked, six things that cost time, and what would make dynamic-fee hooks usable by ordinary traders.
 
 ## How AI was used
 
@@ -232,10 +240,11 @@ Per ETHGlobal's rules. Claude (Anthropic, via Claude Code) was used throughout; 
 | `src/IMarketStateAdapter.sol` | author | comments reviewed | |
 | `src/MarketHours.sol` | — | all of it | Calendar library, pre-reset; kept as-is with its 36 tests |
 | `src/Constants.sol` | author | — | |
-| `test/**` | — | all of it | 174 unit tests + 6 fork tests; the suite is the spec the rebuild was validated against |
+| `test/**` | — | all of it | 174 unit tests + 7 fork tests; the suite is the spec the rebuild was validated against |
 | `docs/build-notes.md` | — | all of it | Audit-round write-ups, reviewed by the author |
 | `docs/proposal.md`, `docs/architecture.md`, `docs/prior-art-*.md`, this README | author | edits and the sections added after the rebuild | |
 | `script/` | v4-template boilerplate | — | |
+| `demo/` | — | all of it | Deploy script, replay feed, lens, HTML page, explainer animation, video script. Demo tooling, not part of the hook |
 
 Prompts were conversational, not spec files; the specs Claude worked from are the docs above and the test headers. No AI-generated video, voiceover or images.
 

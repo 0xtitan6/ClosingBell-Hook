@@ -18,3 +18,5 @@ scripts/spread-analysis/data/
 
 # macOS
 .DS_Store
+broadcast/
+demo/addresses.json

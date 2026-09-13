@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClosingBell · AAPL/USDG</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+<style>
+  :root { --bg:#0e1116; --panel:#161b23; --line:#242b36; --text:#e6e9ee; --muted:#8b95a5; --accent:#f5b942; --green:#4cd28a; --red:#ff6b6b; --blue:#6aa9ff; }
+  * { box-sizing:border-box }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 -apple-system,BlinkMacSystemFont,"Inter",Segoe UI,Roboto,sans-serif; }
+  .wrap { max-width:960px; margin:0 auto; padding:28px 20px 60px; }
+  h1 { font-size:22px; margin:0 0 4px; letter-spacing:.2px }
+  h1 small { color:var(--muted); font-weight:400; font-size:14px; margin-left:8px }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:22px }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:18px }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px }
+  .card .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.6px }
+  .card .v { font-size:22px; font-weight:600; margin-top:4px; font-variant-numeric:tabular-nums }
+  .card .n { color:var(--muted); font-size:12px; margin-top:2px }
+  .badge { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; letter-spacing:.4px }
+  .s0 { background:#3a1f1f; color:var(--red) } .s1 { background:#173626; color:var(--green) } .s2 { background:#3a2f14; color:var(--accent) } .s3 { background:#182a45; color:var(--blue) }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin-bottom:18px }
+  .panel h2 { font-size:14px; color:var(--muted); text-transform:uppercase; letter-spacing:.6px; margin:0 0 14px }
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center }
+  select, input, button { font:inherit; border-radius:8px; border:1px solid var(--line); background:#0f141b; color:var(--text); padding:10px 12px }
+  input { width:160px; font-variant-numeric:tabular-nums }
+  button { cursor:pointer; background:#1d2530 } button:hover { background:#263040 } button:disabled { opacity:.5; cursor:default }
+  button.primary { background:var(--accent); color:#1a1200; font-weight:700; border-color:transparent }
+  button.primary:hover { background:#ffc858 }
+  .quote { margin-left:auto; text-align:right }
+  .quote .big { font-size:28px; font-weight:700; font-variant-numeric:tabular-nums }
+  .quote .big.low { color:var(--green) } .quote .big.mid { color:var(--accent) } .quote .big.high { color:var(--red) }
+  .quote .why { color:var(--muted); font-size:12px }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; font-size:14px }
+  th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line) } th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.5px }
+  td.r, th.r { text-align:right }
+  .muted { color:var(--muted) }
+  .foot { color:var(--muted); font-size:12px; margin-top:24px; line-height:1.6 }
+  .err { color:var(--red); font-size:13px; margin-top:8px; white-space:pre-wrap }
+  code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px; color:#c9d1dc }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ClosingBell <small>AAPL / USDG · Uniswap v4 · Robinhood Chain (local fork)</small></h1>
+  <div class="sub">Fork of Robinhood Chain taken <strong>Sunday Sept 6 2026, Labor Day weekend</strong>: real PoolManager, real AAPL and USDG tokens, and the real Chainlink AAPL/USD prints replayed against the chain clock. The fee is what the hook charges at the moment shown.</div>
+
+  <div class="grid">
+    <div class="card"><div class="k">Session</div><div class="v"><span id="session" class="badge s0">…</span></div><div class="n" id="clock">—</div></div>
+    <div class="card"><div class="k">Chainlink reference</div><div class="v" id="ref">—</div><div class="n" id="refNote">—</div></div>
+    <div class="card"><div class="k">Pool price</div><div class="v" id="pool">—</div><div class="n" id="gap">—</div></div>
+    <div class="card"><div class="k">Quiet-hours fee</div><div class="v">0.05%</div><div class="n">what this pool charges during regular hours</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Swap</h2>
+    <div class="row">
+      <select id="dir">
+        <option value="buy">Buy AAPL with USDG</option>
+        <option value="sell">Sell AAPL for USDG</option>
+      </select>
+      <input id="amt" type="number" min="0" step="any" value="1000">
+      <span id="unit" class="muted">USDG</span>
+      <button id="swap" class="primary">Swap</button>
+      <div class="quote">
+        <div class="big" id="feePct">—</div>
+        <div class="why" id="feeWhy">—</div>
+      </div>
+    </div>
+    <div class="err" id="err"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Time travel <span class="muted" style="text-transform:none;letter-spacing:0">(the chain clock moves; the feed replays what Chainlink actually published at that time)</span></h2>
+    <div class="row">
+      <button data-dt="3600">+1 hour</button>
+      <button data-dt="21600">+6 hours</button>
+      <button data-to="1788825000">Mon 19:50 ET · before the feed wakes</button>
+      <button data-to="1788826800">Mon 20:20 ET · feed wakes, gaps −0.6%</button>
+      <button data-to="1788874500">Tue 09:35 ET · regular open</button>
+      <button id="reset" title="evm_revert to the snapshot taken when the page loaded">↺ Reset to Sunday</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Swaps on this pool</h2>
+    <table>
+      <thead><tr><th>Time (ET)</th><th>Session</th><th>Swap</th><th class="r">Fee</th><th class="r">Paid</th><th class="r">Pool after</th></tr></thead>
+      <tbody id="log"><tr><td colspan="6" class="muted">none yet</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="foot">
+    Hook <code id="hookAddr">—</code> · pool opened at the live reference · liquidity is thin on purpose, so large swaps hit the 4% cap fast.<br>
+    Fee = floor(session) × staleness × deviation, capped. Closed floor 0.30%, staleness climbs ~0.9%/day while the calendar is closed, deviation prices the gap this swap would leave.
+  </div>
+</div>
+
+<script>
+const RPC = "http://127.0.0.1:8545";
+const KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"; // anvil account 0
+const MIN_SQRT = 4295128740n, MAX_SQRT = 1461446703485210103287273052203988822378723970341n;
+const SESSION = ["Closed", "Regular", "Extended", "Overnight"];
+
+const HOOK_ABI = ["function quoteFee((bool zeroForOne,int256 amountSpecified,uint160 sqrtPriceLimitX96) p) view returns (uint24)"];
+const LENS_ABI = ["function state() view returns ((uint256 timestamp,uint8 session,uint256 lastClose,uint160 sqrtPriceX96,uint128 liquidity,uint256 poolPrice,(bool isLive,uint256 price,uint256 loPrice,uint256 hiPrice,bool hasQuoteFeed,uint256 quotePrice,uint256 loQuotePrice,uint256 hiQuotePrice) market,uint256 refPrice))"];
+const ROUTER_ABI = ["function swap((address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks) key,(bool zeroForOne,int256 amountSpecified,uint160 sqrtPriceLimitX96) params,(bool takeClaims,bool settleUsingBurn) settings,bytes hookData) payable returns (int256)"];
+const PM_ABI = ["event Swap(bytes32 indexed id,address indexed sender,int128 amount0,int128 amount1,uint160 sqrtPriceX96,uint128 liquidity,int24 tick,uint24 fee)"];
+
+let A, provider, signer, hook, lens, router, pmIface, key, st, snap;
+const $ = id => document.getElementById(id);
+const fmtUSD = x => "$" + Number(x).toLocaleString(undefined, {maximumFractionDigits: 2, minimumFractionDigits: 2});
+const fmtET = ts => new Date(Number(ts) * 1000).toLocaleString("en-US", {timeZone: "America/New_York", weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"});
+const e18 = x => Number(x) / 1e18;
+
+async function init() {
+  A = await (await fetch("addresses.json")).json();
+  provider = new ethers.JsonRpcProvider(RPC, undefined, {staticNetwork: true});
+  signer = new ethers.Wallet(KEY, provider);
+  hook = new ethers.Contract(A.hook, HOOK_ABI, provider);
+  lens = new ethers.Contract(A.lens, LENS_ABI, provider);
+  router = new ethers.Contract(A.swapRouter, ROUTER_ABI, signer);
+  pmIface = new ethers.Interface(PM_ABI);
+  key = {currency0: A.usdg, currency1: A.aapl, fee: A.fee, tickSpacing: A.tickSpacing, hooks: A.hook};
+  $("hookAddr").textContent = A.hook;
+  snap = await provider.send("evm_snapshot", []);
+  await refresh();
+}
+
+async function reset() {
+  // a snapshot is consumed by revert, so take a fresh one right after
+  await provider.send("evm_revert", [snap]);
+  snap = await provider.send("evm_snapshot", []);
+  $("log").innerHTML = '<tr><td colspan="6" class="muted">none yet</td></tr>';
+  await refresh();
+}
+
+function params() {
+  const buy = $("dir").value === "buy";
+  const amt = Number($("amt").value || 0);
+  const raw = buy ? BigInt(Math.round(amt * 1e6)) : ethers.parseUnits(String(amt), 18);
+  return {buy, amt, p: {zeroForOne: buy, amountSpecified: -raw, sqrtPriceLimitX96: buy ? MIN_SQRT + 1n : MAX_SQRT - 1n}};
+}
+
+async function refresh() {
+  $("err").textContent = "";
+  st = await lens.state();
+  const s = Number(st.session);
+  const b = $("session"); b.textContent = SESSION[s]; b.className = "badge s" + s;
+  const since = (Number(st.timestamp) - Number(st.lastClose)) / 3600;
+  const lastPrint = await lastPrintET();
+  $("clock").textContent = fmtET(st.timestamp) + (s === 0 ? ` · ${since.toFixed(1)} h since close` : "");
+  const ref = e18(st.refPrice), pool = e18(st.poolPrice);
+  $("ref").textContent = fmtUSD(ref);
+  $("refNote").textContent = (st.market.isLive ? "feed live" : "feed stale, " + since.toFixed(0) + " h since close") + " · last print " + lastPrint;
+  $("pool").textContent = fmtUSD(pool);
+  const gap = (pool / ref - 1) * 100;
+  $("gap").textContent = (gap >= 0 ? "+" : "") + gap.toFixed(3) + "% vs reference";
+  await quote();
+}
+
+const FEED_ABI = ["function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)"];
+let feed;
+async function lastPrintET() {
+  if (!feed) feed = new ethers.Contract(await new ethers.Contract(A.adapter, ["function stockFeed() view returns (address)"], provider).stockFeed(), FEED_ABI, provider);
+  const r = await feed.latestRoundData();
+  return fmtET(r[2]);
+}
+
+async function quote() {
+  const {buy, amt, p} = params();
+  $("unit").textContent = buy ? "USDG" : "AAPL";
+  if (!(amt > 0)) { $("feePct").textContent = "—"; $("feeWhy").textContent = "—"; return; }
+  try {
+    const pips = Number(await hook.quoteFee(p));
+    const pct = pips / 1e4;
+    const usd = (buy ? amt : amt * e18(st.poolPrice)) * pct / 100;
+    const el = $("feePct"); el.textContent = pct.toFixed(2) + "%";
+    el.className = "big " + (pips <= 800 ? "low" : pips < 10000 ? "mid" : "high");
+    const s = Number(st.session);
+    const floor = (s === 0 || !st.market.isLive) ? "closed floor 0.30%" : s === 1 ? "base 0.05%" : "elevated floor 0.08%";
+    $("feeWhy").textContent = `${pips} pips · ${fmtUSD(usd)} on this swap · ${floor}${pips >= 40000 ? " · capped" : ""}`;
+  } catch (e) { $("feePct").textContent = "—"; $("err").textContent = short(e); }
+}
+
+async function doSwap() {
+  const {buy, amt, p} = params();
+  if (!(amt > 0)) return;
+  $("swap").disabled = true; $("err").textContent = "";
+  try {
+    const tx = await router.swap(key, p, {takeClaims: false, settleUsingBurn: false}, "0x");
+    const rc = await tx.wait();
+    let ev;
+    for (const l of rc.logs) { try { const d = pmIface.parseLog(l); if (d && d.name === "Swap") ev = d; } catch {} }
+    const before = st;
+    await refresh();
+    const pips = Number(ev.args.fee), pct = pips / 1e4;
+    const usd = (buy ? amt : amt * e18(before.poolPrice)) * pct / 100;
+    const row = document.createElement("tr");
+    row.innerHTML = `<td>${fmtET(before.timestamp)}</td><td><span class="badge s${Number(before.session)}">${SESSION[Number(before.session)]}</span></td>
+      <td>${buy ? "buy AAPL" : "sell AAPL"} · ${amt.toLocaleString()} ${buy ? "USDG" : "AAPL"}</td>
+      <td class="r">${pct.toFixed(2)}% <span class="muted">(${pips})</span></td><td class="r">${fmtUSD(usd)}</td><td class="r">${fmtUSD(e18(st.poolPrice))}</td>`;
+    const log = $("log"); if (log.firstElementChild?.children.length === 1) log.innerHTML = "";
+    log.prepend(row);
+  } catch (e) { $("err").textContent = short(e); }
+  $("swap").disabled = false;
+}
+
+async function warp(dt) {
+  await provider.send("evm_increaseTime", [dt]);
+  await provider.send("evm_mine", []);
+  await refresh();
+}
+
+async function warpTo(ts) {
+  const dt = ts - Number(st.timestamp);
+  if (dt <= 0) { $("err").textContent = "Already past that moment — Reset first."; return; }
+  await warp(dt);
+}
+
+const short = e => (e?.shortMessage || e?.message || String(e)).slice(0, 300);
+$("dir").addEventListener("change", quote);
+$("amt").addEventListener("input", quote);
+$("swap").addEventListener("click", doSwap);
+document.querySelectorAll("button[data-dt]").forEach(b => b.addEventListener("click", () => warp(Number(b.dataset.dt))));
+document.querySelectorAll("button[data-to]").forEach(b => b.addEventListener("click", () => warpTo(Number(b.dataset.to))));
+$("reset").addEventListener("click", reset);
+init().catch(e => $("err").textContent = "Is demo/run.sh running? " + short(e));
+</script>
+</body>
+</html>

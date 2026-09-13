@@ -1,0 +1,436 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClosingBell · explainer</title>
+<style>
+  /* Same palette as demo/index.html so the two segments cut together. */
+  :root { --bg:#0e1116; --panel:#161b23; --line:#242b36; --text:#e6e9ee; --muted:#8b95a5; --accent:#f5b942; --green:#4cd28a; --red:#ff6b6b; --blue:#6aa9ff; }
+  * { box-sizing:border-box }
+  html, body { height:100%; margin:0; background:var(--bg); color:var(--text); overflow:hidden; cursor:none;
+    font:15px/1.45 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI",Roboto,sans-serif; }
+  body.idle { cursor:default }
+
+  /* Fixed 1920x1080 stage, scaled to fit the window. Record full-screen at any resolution. */
+  #stage { position:absolute; left:50%; top:50%; width:1920px; height:1080px; transform-origin:center center; background:var(--bg); }
+  .layer { position:absolute; inset:0; opacity:0; }
+
+  /* ---- Title / benefits / end cards ---- */
+  .card-bg { position:absolute; inset:0; background:
+      radial-gradient(1200px 700px at 15% 85%, #3a2f14 0%, transparent 60%),
+      radial-gradient(900px 600px at 85% 10%, #182a45 0%, transparent 60%), var(--bg); }
+  .grain { position:absolute; inset:0; opacity:.35; mix-blend-mode:overlay;
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.5'/%3E%3C/svg%3E"); }
+  .brand { position:absolute; left:110px; top:90px; font-size:26px; color:var(--muted); letter-spacing:.3px }
+  .brand b { color:var(--text); font-weight:600 }
+  .title { position:absolute; left:110px; bottom:150px; }
+  .title .kicker { font-size:44px; color:var(--muted); margin-bottom:6px }
+  .title .name { font-size:128px; font-weight:700; line-height:1.02; letter-spacing:-2px }
+  .title .tag { font-size:40px; color:var(--text); margin-top:26px; max-width:1500px; line-height:1.3 }
+  .title .tag em { color:var(--accent); font-style:normal }
+  .rows { position:absolute; left:110px; top:260px; }
+  .rows .r { display:flex; gap:44px; align-items:baseline; margin-bottom:64px; opacity:0; transform:translateY(18px); }
+  .rows .n { font-size:56px; color:var(--muted); font-variant-numeric:tabular-nums; width:90px }
+  .rows .t { font-size:74px; font-weight:600; letter-spacing:-1px; line-height:1.12; max-width:1500px }
+  .rows .t small { display:block; font-size:34px; font-weight:400; color:var(--muted); margin-top:6px }
+
+  /* ---- Main scene ---- */
+  .chip { position:absolute; left:110px; top:84px; display:flex; align-items:center; gap:18px; }
+  .clock { font-size:40px; font-weight:600; font-variant-numeric:tabular-nums; letter-spacing:-.5px; min-width:760px }
+  .clock small { font-weight:400; color:var(--muted) }
+  .badge { display:inline-block; padding:8px 22px; border-radius:999px; font-size:26px; font-weight:600; letter-spacing:.4px }
+  .s0 { background:#3a1f1f; color:var(--red) } .s1 { background:#173626; color:var(--green) } .s2 { background:#3a2f14; color:var(--accent) } .s3 { background:#182a45; color:var(--blue) }
+  .pair { position:absolute; right:110px; top:92px; font-size:28px; color:var(--muted); text-align:right }
+  .pair b { color:var(--text); font-weight:600 }
+
+  svg#scene { position:absolute; left:0; top:0; }
+  .lbl { font-size:28px; fill:var(--muted) }
+  .lbl.strong { fill:var(--text); font-weight:600 }
+  .num { font-size:34px; font-weight:600; fill:var(--text); font-variant-numeric:tabular-nums }
+  .feeText { font-size:30px; font-weight:700; font-variant-numeric:tabular-nums }
+  .feeTitle { font-size:24px; fill:var(--muted); letter-spacing:.6px; text-transform:uppercase }
+  .feeWhy { font-size:24px; fill:var(--muted); font-variant-numeric:tabular-nums }
+  .swapLbl { font-size:28px; fill:var(--text); font-weight:600 }
+
+  .caption { position:absolute; left:110px; right:110px; bottom:120px; font-size:54px; font-weight:600; line-height:1.22; letter-spacing:-.8px; opacity:0; max-width:1620px }
+  .caption em { color:var(--accent); font-style:normal }
+  .foot { position:absolute; left:110px; bottom:52px; font-size:22px; color:var(--muted); opacity:.85 }
+
+  /* ---- End card table ---- */
+  .end { position:absolute; left:110px; top:200px; right:110px }
+  .end h2 { font-size:64px; font-weight:700; margin:0 0 10px; letter-spacing:-1px }
+  .end .sub { font-size:28px; color:var(--muted); margin-bottom:24px }
+  table { border-collapse:collapse; font-variant-numeric:tabular-nums; font-size:34px; width:1500px }
+  th, td { text-align:left; padding:12px 10px; border-bottom:1px solid var(--line) }
+  th { color:var(--muted); font-weight:500; font-size:24px; text-transform:uppercase; letter-spacing:.6px }
+  td.r, th.r { text-align:right }
+  td .hi { color:var(--red); font-weight:700 } td .lo { color:var(--green); font-weight:700 } td .mid { color:var(--accent); font-weight:700 }
+  .end .links { margin-top:44px; font-size:30px; color:var(--muted); line-height:1.7 }
+  .end .links b { color:var(--text); font-weight:600 }
+
+  /* ---- Controls (never recorded: hidden while playing) ---- */
+  #hud { position:fixed; left:0; right:0; bottom:0; padding:14px 18px; display:flex; gap:14px; align-items:center;
+    background:rgba(14,17,22,.92); border-top:1px solid var(--line); font-size:14px; color:var(--muted); z-index:10; transition:opacity .2s }
+  #hud.hidden { opacity:0; pointer-events:none }
+  #hud button { font:inherit; border-radius:8px; border:1px solid var(--line); background:#1d2530; color:var(--text); padding:8px 14px; cursor:pointer }
+  #hud button.primary { background:var(--accent); color:#1a1200; font-weight:700; border-color:transparent }
+  #hud input[type=range] { flex:1 }
+  #hud .t { font-variant-numeric:tabular-nums; min-width:110px }
+  #start { position:fixed; inset:0; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:14px;
+    background:var(--bg); z-index:20; font-size:20px; color:var(--muted); cursor:default }
+  #start b { font-size:34px; color:var(--text) }
+  #start.hidden { display:none }
+</style>
+</head>
+<body class="idle">
+
+<div id="start">
+  <b>ClosingBell explainer</b>
+  <div>Full-screen the browser, start your screen recording, then press <kbd>Space</kbd>.</div>
+  <div>The first 1.5 s is blank so the keypress is easy to trim. <kbd>R</kbd> restarts, <kbd>←</kbd>/<kbd>→</kbd> scrub 1 s.</div>
+</div>
+
+<div id="stage">
+
+  <!-- Title card -->
+  <div class="layer" id="L_title">
+    <div class="card-bg"></div><div class="grain"></div>
+    <div class="brand">Uniswap v4 hook · <b>Robinhood Chain</b></div>
+    <div class="title">
+      <div class="kicker">Introducing</div>
+      <div class="name">ClosingBell Hook</div>
+      <div class="tag">Tokenized stocks trade 24/7. <em>The reference price doesn't.</em></div>
+    </div>
+  </div>
+
+  <!-- Main scene -->
+  <div class="layer" id="L_main">
+    <div class="chip">
+      <div class="clock" id="clock">—</div>
+      <span class="badge s1" id="session">Regular</span>
+    </div>
+    <div class="pair"><b>AAPL / USDG</b><br>Chainlink AAPL/USD · us_equities_24/5 · real prints</div>
+
+    <svg id="scene" width="1920" height="1080" viewBox="0 0 1920 1080">
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--text)"/>
+        </marker>
+        <marker id="arrowRed" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--red)"/>
+        </marker>
+      </defs>
+
+      <!-- Fee bar -->
+      <text class="feeTitle" x="260" y="318">LP fee on the next swap</text>
+      <text id="feeWhy" class="feeWhy" x="1660" y="318" text-anchor="end"></text>
+      <rect x="260" y="332" width="1400" height="56" rx="12" fill="var(--panel)" stroke="var(--line)"/>
+      <rect id="feeBar" x="260" y="332" width="40" height="56" rx="12" fill="var(--green)"/>
+      <text id="feeVal" class="feeText" x="280" y="371">0.05%</text>
+
+      <!-- Price track -->
+      <rect x="260" y="470" width="1400" height="90" rx="14" fill="var(--panel)" stroke="var(--line)"/>
+      <g id="ticks" opacity=".6"></g>
+
+      <!-- Ghost of frozen reference (Friday close) -->
+      <g id="refGhost" opacity="0">
+        <line x1="960" y1="440" x2="960" y2="590" stroke="var(--muted)" stroke-width="6" stroke-dasharray="10 10"/>
+      </g>
+
+      <!-- Live reference -->
+      <g id="ref">
+        <line id="refLine" x1="960" y1="440" x2="960" y2="590" stroke="var(--accent)" stroke-width="8" stroke-linecap="round"/>
+        <text id="refLbl" class="lbl strong" x="960" y="428" text-anchor="middle">Chainlink reference</text>
+      </g>
+
+      <!-- Pool marker -->
+      <g id="pool">
+        <path id="poolTri" d="M960,600 l-18,30 h36 z" fill="var(--text)"/>
+        <text id="poolLbl" class="lbl strong" x="960" y="672" text-anchor="middle">Pool price</text>
+        <text id="poolNum" class="num" x="960" y="712" text-anchor="middle">—</text>
+      </g>
+
+      <!-- Swap arrow -->
+      <g id="swap" opacity="0">
+        <line id="swapLine" x1="960" y1="515" x2="1100" y2="515" stroke="var(--text)" stroke-width="10" stroke-linecap="round" marker-end="url(#arrow)"/>
+        <text id="swapLbl" class="swapLbl" x="1030" y="770" text-anchor="middle"></text>
+      </g>
+    </svg>
+
+    <div class="caption" id="c0">Friday, regular hours. The pool tracks a <em>live</em> Chainlink reference.<br>Fee: 5 bps.</div>
+    <div class="caption" id="c1">Friday 8 PM ET. The feed goes <em>dark</em>. Labor Day weekend:<br>72 hours until it prints again. The pool is the only price.</div>
+    <div class="caption" id="c2">The fee ramps with <em>time since the close</em>, not with what the feed says,<br>and caps at 3× the closed floor.</div>
+    <div class="caption" id="c3">Weekend flow still fills. Moving back toward the last close<br>pays <em>only the floor</em>.</div>
+    <div class="caption" id="c4">Monday is Labor Day. Market shut, feed still dark.<br>The calendar library knows; the fee holds.</div>
+    <div class="caption" id="c5">Monday 8 PM. The feed wakes and <em>gaps −0.6%</em>.<br>The pool hasn't moved. This gap is reference-created.</div>
+    <div class="caption" id="c6">The swap that closes it is the arbitrage.<br>Restoring, but reference-created: it pays the <em>deviation surcharge</em>.</div>
+    <div class="caption" id="c7">Tuesday 9:30, after 89 hours. Market open, feed live.<br>Fee back to <em>5 bps</em>. The pool never closed.</div>
+    <div class="foot">Real Chainlink AAPL/USD prints, Sept 4–8 2026. Fees computed with the hook's formula and the demo pool's parameters; swap sizes illustrative.</div>
+  </div>
+
+  <!-- Benefits card -->
+  <div class="layer" id="L_rows">
+    <div class="card-bg"></div><div class="grain"></div>
+    <div class="brand"><b>ClosingBell Hook</b></div>
+    <div class="rows">
+      <div class="r"><div class="n">01</div><div class="t">The pool stays open all weekend<small>Uninformed flow fills and pays LPs. Only the toxic direction and size is priced out.</small></div></div>
+      <div class="r"><div class="n">02</div><div class="t">The reopen trade pays for the gap it captures<small>Deviation is split by who created it. Reference-created gaps are charged even when "restoring".</small></div></div>
+      <div class="r"><div class="n">03</div><div class="t">One hook for any v4 stock pool with a Chainlink feed<small>Calendar + live reference, computed on-chain. Parameters immutable. MIT.</small></div></div>
+    </div>
+  </div>
+
+  <!-- End card -->
+  <div class="layer" id="L_end">
+    <div class="card-bg"></div><div class="grain"></div>
+    <div class="brand"><b>ClosingBell Hook</b> · results</div>
+    <div class="end">
+      <h2>Measured on a fork of Robinhood Chain</h2>
+      <div class="sub">Labor Day weekend 2026, fork taken Sunday Sept 6. Real PoolManager, real tokens, real Chainlink prints replayed. 1,000 USDG swaps.</div>
+      <table>
+        <tr><th>moment</th><th class="r">fee</th></tr>
+        <tr><td>Sun 9:05 AM · feed dark since Friday</td><td class="r">0.81%</td></tr>
+        <tr><td>Mon 7:50 PM · Labor Day, still dark, staleness capped</td><td class="r"><span class="hi">1.00%</span></td></tr>
+        <tr><td>Mon 8:20 PM · feed woke, gapped −0.6% · the arbitrage into it</td><td class="r"><span class="mid">0.14%</span> · surcharged</td></tr>
+        <tr><td>Mon 8:20 PM · buy away from the new print</td><td class="r">0.16%</td></tr>
+        <tr><td>Tue 9:35 AM · regular open, reference moved again</td><td class="r">0.12%</td></tr>
+        <tr><td>regular hours, pool at the reference</td><td class="r"><span class="lo">0.05%</span></td></tr>
+      </table>
+      <div class="links">ETHOnline 2026 · Uniswap Foundation track<br><b>github.com/0xtitan6/ClosingBell-Hook</b></div>
+    </div>
+  </div>
+
+</div>
+
+<div id="hud" class="hidden">
+  <button class="primary" id="play">Play</button>
+  <button id="restart">Restart</button>
+  <span class="t" id="tdisp">0.0 s</span>
+  <input type="range" id="scrub" min="0" max="86" step="0.05" value="0">
+  <span>Space play/pause · R restart · ←/→ scrub</span>
+</div>
+
+<script>
+(() => {
+  // ---------- timeline helpers ----------
+  const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+  const easeIO = u => u < .5 ? 4*u*u*u : 1 - Math.pow(-2*u + 2, 3) / 2;
+  const easeOut = u => 1 - Math.pow(1 - u, 3);
+  const lin = u => u;
+  function tween(keys, t, ease = easeIO) {
+    if (t <= keys[0][0]) return keys[0][1];
+    for (let i = 1; i < keys.length; i++) {
+      if (t <= keys[i][0]) {
+        const [t0, v0] = keys[i-1], [t1, v1] = keys[i];
+        if (t1 === t0) return v1;
+        return v0 + (v1 - v0) * ease((t - t0) / (t1 - t0));
+      }
+    }
+    return keys[keys.length-1][1];
+  }
+  function win(t, a, b, d = .5) {
+    if (t < a || t > b) return 0;
+    if (t < a + d) return (t - a) / d;
+    if (t > b - d) return (b - t) / d;
+    return 1;
+  }
+
+  // ---------- the hook's parameters (demo/DeployDemo.s.sol) and its fee formula (src/FeeCurve.sol) ----------
+  const P = { baseFee: 500, elevatedFloor: 800, closedFloor: 3000, feeCap: 40_000,   // pips
+              stalenessSlope: 10_684_000_000_000 / 1e18,   // per second, added to a 1.0 multiplier
+              stalenessMax: 3, devKink: 0.005, devSlope1: 100, devSlope2: 200 };
+  const CLOSED = 0, REGULAR = 1, EXTENDED = 2, OVERNIGHT = 3;
+  const SESSION_NAME = ['Closed', 'Regular', 'Extended', 'Overnight'];
+  function floorFor(s) { return s === CLOSED ? P.closedFloor : s === REGULAR ? P.baseFee : P.elevatedFloor; }
+  function stalenessMult(s, secSinceClose) { if (s !== CLOSED || secSinceClose <= 0) return 1; return Math.min(1 + secSinceClose * P.stalenessSlope, P.stalenessMax); }
+  function deviationMult(dev, restoring) {
+    if (restoring || dev === 0) return 1;
+    if (dev <= P.devKink) return 1 + dev * P.devSlope1;
+    return 1 + P.devKink * P.devSlope1 + (dev - P.devKink) * P.devSlope2;
+  }
+  function feePips(s, secSinceClose, dev, restoring) {
+    return Math.min(floorFor(s) * stalenessMult(s, secSinceClose) * deviationMult(dev, restoring), P.feeCap);
+  }
+
+  // ---------- Labor Day weekend 2026, real AAPL/USD prints (demo/AAPLRounds.sol) ----------
+  // Clock unit: minutes since Fri Sep 4, 16:00 ET.
+  const H = 60;
+  const T_POST_END = 4*H;                 // Fri 20:00 — calendar close, staleness starts here (MarketHours.calendar)
+  const T_WAKE = 76*H;                    // Mon 20:00 — first print after the weekend (Labor Day Monday: closed all day)
+  const T_GAP = 76*H + 17;                // Mon 20:17 — second print, the gap
+  const T_PRE = 84*H;                     // Tue 04:00
+  const T_OPEN = 89*H + 30;               // Tue 09:30
+  const FRI_CLOSE = 320.52;               // Fri 15:51 ET print, the last before the weekend
+  const WAKE_PX = 320.31, GAP_PX = 318.53;
+  const DAYS = ['Fri Sep 4', 'Sat Sep 5', 'Sun Sep 6', 'Mon Sep 7 · Labor Day', 'Tue Sep 8'];
+
+  function sessionOf(m) {           // mirrors MarketHours._session with Monday a holiday
+    if (m < 0) return REGULAR;
+    if (m < T_POST_END) return EXTENDED;
+    if (m < T_WAKE) return CLOSED;
+    if (m < T_PRE) return OVERNIGHT;
+    if (m < T_OPEN) return EXTENDED;
+    return REGULAR;
+  }
+  function refPriceAt(m) { return m < T_WAKE ? FRI_CLOSE : m < T_GAP ? WAKE_PX : GAP_PX; }
+  function clockLabel(m) {
+    const total = 16*H + Math.round(m);
+    const d = Math.floor(total / 1440), mm = ((total % 1440) + 1440) % 1440;
+    let h = Math.floor(mm / 60), min = mm % 60; const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
+    return `${DAYS[clamp(d,0,4)]} <small>·</small> ${h}:${String(min).padStart(2,'0')} ${ap} ET`;
+  }
+
+  // ---------- stage geometry ----------
+  const T0 = 1.5;                         // blank lead-in for trimming
+  const X0 = 260, W = 1400, PX_PER_PCT = W / 4;   // axis spans −2%..+2% around the Friday close
+  const xOf = pct => X0 + W/2 + pct * PX_PER_PCT;
+  const pctOf = px => (px / FRI_CLOSE - 1) * 100;
+  const DUR = 94;
+  const S = 13;                           // main scene starts (title card holds 13 s)
+
+  // clock keyframes (seconds → minutes)
+  const clockKeys = [[S, -10], [S+8, 0], [S+11, T_POST_END], [S+15, T_POST_END + H],
+                     [S+16, T_POST_END + H], [S+23, 46*H],            // → Sun 2 PM
+                     [S+31, 46*H], [S+34, 70*H], [S+37, T_WAKE - 10], // Labor Day → Mon 7:50 PM
+                     [S+38, T_WAKE], [S+40.5, T_GAP], [S+52.5, T_GAP],
+                     [S+53, T_GAP], [S+56, T_OPEN], [S+61, T_OPEN + 5]];
+  // pool price keyframes (USDG per AAPL)
+  const wob = FRI_CLOSE * 1.003;
+  const poolKeys = [[S+24, FRI_CLOSE], [S+26, wob], [S+27.5, wob], [S+29, FRI_CLOSE], [S+46, FRI_CLOSE], [S+48, GAP_PX], [S+56, GAP_PX]];
+  const captions = [
+    ['c0', S+1,    S+8.5],
+    ['c1', S+9,    S+15.5],
+    ['c2', S+16,   S+23.5],
+    ['c3', S+24,   S+30.5],
+    ['c4', S+31,   S+37.2],
+    ['c5', S+38.5, S+45.5],
+    ['c6', S+46,   S+52.5],
+    ['c7', S+56.5, S+61],
+  ];
+  const swaps = [ // [start, end, fromPx, toPx, label, red]
+    [S+24.3, S+27.3, FRI_CLOSE, wob, 'weekend buyer · adverse, small', false],
+    [S+27.8, S+30.3, wob, FRI_CLOSE, 'seller · pool-created, restoring · floor only', false],
+    [S+46, S+51, FRI_CLOSE, GAP_PX, 'one arbitrage swap · reference-created gap', true],
+  ];
+  const RESTORING_WIN = [S+27.8, S+30.3];  // only the pool-created return trip earns the exemption
+
+  // ---------- DOM ----------
+  const $ = id => document.getElementById(id);
+  const L = { title: $('L_title'), main: $('L_main'), rows: $('L_rows'), end: $('L_end') };
+  const rowEls = [...document.querySelectorAll('.rows .r')];
+  { const g = $('ticks'); let s = '';
+    for (let p = -2; p <= 2; p++) {
+      const x = xOf(p);
+      s += `<line x1="${x}" y1="470" x2="${x}" y2="${p===0?470:520}" stroke="var(--line)" stroke-width="2"/>`;
+      if (p !== 0) s += `<text class="lbl" x="${x}" y="548" text-anchor="middle" font-size="22">${p>0?'+':''}${p}%</text>`;
+    }
+    g.innerHTML = s; }
+
+  function feeColor(pips) { return pips < 1500 ? 'var(--green)' : pips < 10000 ? 'var(--accent)' : 'var(--red)'; }
+  function feeWidth(pips) { return Math.max(40, Math.sqrt(pips / P.feeCap) * W); }
+  const fmtPct = pips => (pips / 10000).toFixed(2) + '%';
+  const fmtPx = v => v.toFixed(2);
+
+  // ---------- render(t) ----------
+  function render(t) {
+    L.title.style.opacity = win(t, T0, S + .6, .6);
+    L.main.style.opacity  = win(t, S, S + 61.5, .6);
+    L.rows.style.opacity  = win(t, S + 61, S + 71.5, .6);
+    L.end.style.opacity   = win(t, S + 71, DUR + 5, .6);
+    rowEls.forEach((el, i) => { const u = clamp((t - (S + 62 + i*1.6)) / .7, 0, 1); el.style.opacity = u; el.style.transform = `translateY(${18*(1-u)}px)`; });
+
+    // clock + session
+    const m = tween(clockKeys, t, lin);
+    $('clock').innerHTML = clockLabel(m);
+    const s = sessionOf(m);
+    const b = $('session'); b.textContent = SESSION_NAME[s]; b.className = 'badge s' + s;
+
+    // reference
+    const dark = m >= T_POST_END && m < T_WAKE;
+    const woke = m >= T_WAKE;
+    const refPx = refPriceAt(m);
+    const rx = xOf(pctOf(refPx));
+    $('refLine').setAttribute('x1', rx); $('refLine').setAttribute('x2', rx); $('refLbl').setAttribute('x', rx);
+    const ref = $('ref');
+    if (dark) { ref.style.opacity = 1 - .75 * clamp((t - (S+11)) / 1.2, 0, 1); $('refLine').setAttribute('stroke', 'var(--muted)'); $('refLbl').textContent = 'Chainlink reference · frozen at ' + fmtPx(refPx); }
+    else { ref.style.opacity = 1; $('refLine').setAttribute('stroke', 'var(--accent)'); $('refLbl').textContent = (woke ? 'Chainlink reference · live · ' : 'Chainlink reference · ') + fmtPx(refPx); }
+    $('refGhost').setAttribute('opacity', woke ? .6 * (1 - clamp((t - (S+51)) / 2, 0, 1)) : 0);
+
+    // pool
+    const poolPx = tween(poolKeys, t);
+    const px = xOf(pctOf(poolPx));
+    $('poolTri').setAttribute('d', `M${px},600 l-18,30 h36 z`);
+    $('poolLbl').setAttribute('x', px); $('poolNum').setAttribute('x', px);
+    $('poolNum').textContent = fmtPx(poolPx);
+
+    // swap arrows
+    let so = 0;
+    for (const [a, bnd, f, to, lbl, red] of swaps) {
+      const o = win(t, a, bnd, .3); if (o <= 0) continue; so = o;
+      const u = clamp((t - a) / 1.6, 0, 1);
+      const x1 = xOf(pctOf(f)), x2 = xOf(pctOf(f + (to - f) * easeOut(u)));
+      const ln = $('swapLine');
+      ln.setAttribute('x1', x1); ln.setAttribute('x2', x2);
+      ln.setAttribute('stroke', red ? 'var(--red)' : 'var(--text)');
+      ln.setAttribute('marker-end', red ? 'url(#arrowRed)' : 'url(#arrow)');
+      ln.setAttribute('stroke-width', red ? 14 : 10);
+      const tl = $('swapLbl'); tl.textContent = lbl; tl.setAttribute('x', (x1 + xOf(pctOf(to))) / 2); tl.setAttribute('fill', red ? 'var(--red)' : 'var(--text)');
+    }
+    $('swap').setAttribute('opacity', so);
+
+    // fee: the hook's formula on the state shown. Deviation is |pool − ref| / ref; the pool-created
+    // return trip is the only restoring swap; the reference-created gap is charged f(·) either way.
+    const secSinceClose = (m - T_POST_END) * 60;
+    const dev = Math.abs(poolPx / refPx - 1);
+    const restoring = t >= RESTORING_WIN[0] && t <= RESTORING_WIN[1];
+    const pips = feePips(s, secSinceClose, dev, restoring);
+    const fw = feeWidth(pips);
+    $('feeBar').setAttribute('width', fw); $('feeBar').setAttribute('fill', feeColor(pips));
+    $('feeVal').textContent = fmtPct(pips);
+    const fv = $('feeVal');
+    if (fw > 200) { fv.setAttribute('x', X0 + fw - 20); fv.setAttribute('text-anchor', 'end'); fv.style.fill = '#1a1200'; }
+    else { fv.setAttribute('x', X0 + fw + 16); fv.setAttribute('text-anchor', 'start'); fv.style.fill = 'var(--text)'; }
+    const sm = stalenessMult(s, secSinceClose), dm = deviationMult(dev, restoring);
+    $('feeWhy').textContent = `${SESSION_NAME[s].toLowerCase()} floor ${fmtPct(floorFor(s))}` +
+      (sm > 1 ? ` × staleness ${sm.toFixed(2)}` : '') + (dm > 1 ? ` × deviation ${dm.toFixed(2)}` : '') + (restoring ? ' · restoring' : '');
+
+    for (const [id, a, bnd] of captions) $(id).style.opacity = win(t, a, bnd, .45);
+  }
+
+  // ---------- player ----------
+  let t = 0, playing = false, last = 0;
+  const hud = $('hud'), scrub = $('scrub'), tdisp = $('tdisp'), start = $('start');
+  function frame(now) {
+    if (playing) { t = clamp(t + (now - last) / 1000, 0, DUR); if (t >= DUR) playing = false; }
+    last = now; render(t); scrub.value = t; tdisp.textContent = t.toFixed(1) + ' s';
+    $('play').textContent = playing ? 'Pause' : 'Play';
+    requestAnimationFrame(frame);
+  }
+  function setPlaying(p) { playing = p; document.body.classList.toggle('idle', !p); if (p) hideHud(); else showHud(); }
+  let hudTimer;
+  function showHud() { hud.classList.remove('hidden'); clearTimeout(hudTimer); if (playing) hudTimer = setTimeout(hideHud, 1500); }
+  function hideHud() { hud.classList.add('hidden'); }
+
+  $('play').onclick = () => setPlaying(!playing);
+  $('restart').onclick = () => { t = 0; setPlaying(true); };
+  scrub.oninput = () => { t = +scrub.value; };
+  document.addEventListener('mousemove', () => { if (!start.classList.contains('hidden')) return; showHud(); });
+  document.addEventListener('keydown', e => {
+    if (!start.classList.contains('hidden')) { if (e.code === 'Space') { e.preventDefault(); start.classList.add('hidden'); t = 0; setPlaying(true); hideHud(); } return; }
+    if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
+    else if (e.key === 'r' || e.key === 'R') { t = 0; setPlaying(true); hideHud(); }
+    else if (e.key === 'ArrowLeft') { t = clamp(t - 1, 0, DUR); }
+    else if (e.key === 'ArrowRight') { t = clamp(t + 1, 0, DUR); }
+  });
+
+  function fit() { const s = Math.min(innerWidth / 1920, innerHeight / 1080); $('stage').style.transform = `translate(-50%,-50%) scale(${s})`; }
+  addEventListener('resize', fit); fit();
+
+  // ?t=SECONDS renders one frame, paused, with no overlay (used for still checks)
+  const qt = new URLSearchParams(location.search).get('t');
+  if (qt !== null) { t = clamp(+qt, 0, DUR); start.classList.add('hidden'); hideHud(); render(t); }
+  else { render(0); requestAnimationFrame(now => { last = now; frame(now); }); }
+})();
+</script>
+</body>
+</html>
